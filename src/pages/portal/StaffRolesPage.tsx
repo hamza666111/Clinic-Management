@@ -185,6 +185,57 @@ const getErrorMessage = (error: unknown) => {
   return 'Unknown error';
 };
 
+const extractEdgeFunctionErrorMessage = async (error: unknown): Promise<string> => {
+  const fallback = getErrorMessage(error);
+
+  if (!error || typeof error !== 'object') {
+    return fallback;
+  }
+
+  const context = (error as { context?: unknown }).context;
+  if (!context || typeof context !== 'object') {
+    return fallback;
+  }
+
+  const responseLike = context as {
+    json?: () => Promise<unknown>;
+    text?: () => Promise<string>;
+  };
+
+  try {
+    if (typeof responseLike.json === 'function') {
+      const payload = await responseLike.json();
+
+      if (payload && typeof payload === 'object') {
+        const objectPayload = payload as { error?: unknown; message?: unknown };
+
+        if (typeof objectPayload.error === 'string' && objectPayload.error.trim()) {
+          return objectPayload.error;
+        }
+
+        if (typeof objectPayload.message === 'string' && objectPayload.message.trim()) {
+          return objectPayload.message;
+        }
+      }
+    }
+  } catch {
+    // Ignore parse errors and fall back to default message.
+  }
+
+  try {
+    if (typeof responseLike.text === 'function') {
+      const text = await responseLike.text();
+      if (text.trim()) {
+        return text;
+      }
+    }
+  } catch {
+    // Ignore text read errors and use fallback message.
+  }
+
+  return fallback;
+};
+
 export default function StaffRolesPage() {
   const navigate = useNavigate();
   const { profile, refreshProfile } = useAuth();
@@ -624,7 +675,7 @@ export default function StaffRolesPage() {
       return;
     }
 
-    if (requiresClinicSelection || (roleSchemaMode === 'clinic_roles' && !effectiveClinicId)) {
+    if (requiresClinicSelection || !effectiveClinicId) {
       toast.error('Please select a clinic before adding a role');
       return;
     }
@@ -684,7 +735,8 @@ export default function StaffRolesPage() {
         });
 
         if (error) {
-          throw new Error(error.message || 'Role creation request failed');
+          const detailedMessage = await extractEdgeFunctionErrorMessage(error);
+          throw new Error(detailedMessage || error.message || 'Role creation request failed');
         }
 
         const payload = (data || {}) as RoleEdgeResponse;
@@ -708,14 +760,18 @@ export default function StaffRolesPage() {
 
       let createdRole: Role;
 
-      try {
-        createdRole = await createRoleDirect();
-      } catch (directError: unknown) {
-        if (!isPermissionDeniedError(directError)) {
-          throw directError;
-        }
-
+      if (roleSchemaMode === 'clinic_roles') {
         createdRole = await createRoleViaEdgeFunction();
+      } else {
+        try {
+          createdRole = await createRoleDirect();
+        } catch (directError: unknown) {
+          if (!isPermissionDeniedError(directError)) {
+            throw directError;
+          }
+
+          createdRole = await createRoleViaEdgeFunction();
+        }
       }
 
       const nextRoles = sortRoles([...roles, createdRole]);
@@ -729,6 +785,11 @@ export default function StaffRolesPage() {
 
       if (message.includes('Name, email, and password are required')) {
         toast.error('Please deploy the latest create-user edge function, then try adding the role again.');
+        return;
+      }
+
+      if (message.includes('Edge Function returned a non-2xx status code')) {
+        toast.error('Failed to create role via edge function. Please deploy the latest create-user function and try again.');
         return;
       }
 
