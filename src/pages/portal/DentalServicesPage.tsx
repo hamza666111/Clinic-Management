@@ -9,7 +9,7 @@ import { useToast } from '../../hooks/useToast';
 import Modal from '../../components/ui/Modal';
 import ConfirmDialog from '../../components/ui/ConfirmDialog';
 
-const CATEGORIES = [
+const DEFAULT_CATEGORIES = [
   'General Treatments',
   'Restorative Treatments',
   'Cosmetic Treatments',
@@ -21,6 +21,38 @@ const CATEGORIES = [
   'Gum Treatments',
   'Root Canal Procedures',
 ];
+
+const SERVICE_CATEGORIES_STORAGE_KEY = 'clinic_management:service_categories';
+
+const normalizeCategory = (value: string) => value.trim().replace(/\s+/g, ' ');
+
+const mergeCategories = (...categoryLists: string[][]) => {
+  const seen = new Set<string>();
+  const merged: string[] = [];
+
+  categoryLists.forEach((list) => {
+    list.forEach((rawCategory) => {
+      const category = normalizeCategory(rawCategory);
+      if (!category) return;
+      const key = category.toLowerCase();
+      if (seen.has(key)) return;
+      seen.add(key);
+      merged.push(category);
+    });
+  });
+
+  return merged;
+};
+
+const getSavedCategories = () => {
+  if (typeof window === 'undefined') return [] as string[];
+  try {
+    const parsed = JSON.parse(window.localStorage.getItem(SERVICE_CATEGORIES_STORAGE_KEY) || '[]');
+    return Array.isArray(parsed) ? parsed.filter((v): v is string => typeof v === 'string') : [];
+  } catch {
+    return [] as string[];
+  }
+};
 
 const CATEGORY_COLORS: Record<string, string> = {
   'General Treatments': 'bg-sky-100 text-sky-700',
@@ -35,9 +67,9 @@ const CATEGORY_COLORS: Record<string, string> = {
   'Root Canal Procedures': 'bg-orange-100 text-orange-700',
 };
 
-const emptyForm = () => ({
+const emptyForm = (defaultCategory: string) => ({
   service_name: '',
-  category: CATEGORIES[0],
+  category: defaultCategory,
   default_price: '',
   description: '',
 });
@@ -55,8 +87,12 @@ export default function DentalServicesPage() {
   const [showForm, setShowForm] = useState(false);
   const [editService, setEditService] = useState<DentalService | null>(null);
   const [deleteService, setDeleteService] = useState<DentalService | null>(null);
+  const [showCategoryForm, setShowCategoryForm] = useState(false);
+  const [newCategoryName, setNewCategoryName] = useState('');
   const [saving, setSaving] = useState(false);
-  const [form, setForm] = useState(emptyForm());
+  const [savingCategory, setSavingCategory] = useState(false);
+  const [categories, setCategories] = useState<string[]>(() => mergeCategories(DEFAULT_CATEGORIES, getSavedCategories()));
+  const [form, setForm] = useState(() => emptyForm(mergeCategories(DEFAULT_CATEGORIES, getSavedCategories())[0] || 'General Treatments'));
 
   const [clinicPrices, setClinicPrices] = useState<ClinicServicePrice[]>([]);
   const [clinics, setClinics] = useState<Clinic[]>([]);
@@ -76,9 +112,19 @@ export default function DentalServicesPage() {
       .select('*')
       .order('category')
       .order('sort_order');
-    setServices((data || []) as DentalService[]);
+    const fetchedServices = (data || []) as DentalService[];
+    setServices(fetchedServices);
+    setCategories(prev => mergeCategories(DEFAULT_CATEGORIES, prev, fetchedServices.map(s => s.category)));
     setLoading(false);
   }, []);
+
+  useEffect(() => {
+    if (typeof window === 'undefined') return;
+    const nonDefault = categories.filter(
+      category => !DEFAULT_CATEGORIES.some(defaultCategory => defaultCategory.toLowerCase() === category.toLowerCase())
+    );
+    window.localStorage.setItem(SERVICE_CATEGORIES_STORAGE_KEY, JSON.stringify(nonDefault));
+  }, [categories]);
 
   const fetchClinicPrices = useCallback(async (clinicId: string) => {
     if (!clinicId) return;
@@ -120,12 +166,13 @@ export default function DentalServicesPage() {
 
   const openAdd = () => {
     setEditService(null);
-    setForm(emptyForm());
+    setForm(emptyForm(categories[0] || DEFAULT_CATEGORIES[0] || 'General Treatments'));
     setShowForm(true);
   };
 
   const openEdit = (svc: DentalService) => {
     setEditService(svc);
+    setCategories(prev => mergeCategories(prev, [svc.category]));
     setForm({
       service_name: svc.service_name,
       category: svc.category,
@@ -138,10 +185,11 @@ export default function DentalServicesPage() {
   const handleSave = async (e: React.FormEvent) => {
     e.preventDefault();
     if (!form.service_name.trim()) { toast.error('Service name is required.'); return; }
+    if (!normalizeCategory(form.category)) { toast.error('Category is required.'); return; }
     setSaving(true);
     const payload = {
       service_name: form.service_name.trim(),
-      category: form.category,
+      category: normalizeCategory(form.category),
       default_price: Number(form.default_price || 0),
       description: form.description.trim(),
     };
@@ -157,6 +205,24 @@ export default function DentalServicesPage() {
     setSaving(false);
     setShowForm(false);
     fetchServices();
+  };
+
+  const handleAddCategory = (e: React.FormEvent) => {
+    e.preventDefault();
+    const category = normalizeCategory(newCategoryName);
+    if (!category) { toast.error('Category name is required.'); return; }
+    if (categories.some(c => c.toLowerCase() === category.toLowerCase())) {
+      toast.error('Category already exists.');
+      return;
+    }
+
+    setSavingCategory(true);
+    setCategories(prev => mergeCategories(prev, [category]));
+    setForm(prev => ({ ...prev, category }));
+    setNewCategoryName('');
+    setShowCategoryForm(false);
+    setSavingCategory(false);
+    toast.success('Category added.');
   };
 
   const handleDelete = async () => {
@@ -231,7 +297,7 @@ export default function DentalServicesPage() {
               className="appearance-none pl-3 pr-8 py-2.5 text-sm border border-gray-200 rounded-xl focus:outline-none focus:ring-2 focus:ring-sky-300 bg-white"
             >
               <option value="">All Categories</option>
-              {CATEGORIES.map(c => <option key={c} value={c}>{c}</option>)}
+              {categories.map(c => <option key={c} value={c}>{c}</option>)}
             </select>
             <ChevronDown className="pointer-events-none absolute right-2.5 top-1/2 -translate-y-1/2 w-3.5 h-3.5 text-gray-400" />
           </div>
@@ -248,12 +314,20 @@ export default function DentalServicesPage() {
             </div>
           )}
           {canManageServices && tab === 'services' && (
-            <button
-              onClick={openAdd}
-              className="flex items-center gap-2 px-4 py-2.5 bg-sky-600 text-white rounded-xl hover:bg-sky-700 transition-colors text-sm font-medium"
-            >
-              <Plus className="w-4 h-4" /> Add Service
-            </button>
+            <>
+              <button
+                onClick={() => setShowCategoryForm(true)}
+                className="flex items-center gap-2 px-4 py-2.5 bg-white text-sky-700 border border-sky-200 rounded-xl hover:bg-sky-50 transition-colors text-sm font-medium"
+              >
+                <Plus className="w-4 h-4" /> Add Category
+              </button>
+              <button
+                onClick={openAdd}
+                className="flex items-center gap-2 px-4 py-2.5 bg-sky-600 text-white rounded-xl hover:bg-sky-700 transition-colors text-sm font-medium"
+              >
+                <Plus className="w-4 h-4" /> Add Service
+              </button>
+            </>
           )}
         </div>
       </div>
@@ -266,7 +340,7 @@ export default function DentalServicesPage() {
               <p className="text-sm text-gray-500 mt-0.5">Active Services</p>
             </div>
             <div className="bg-white rounded-2xl border border-gray-100 p-4 shadow-sm">
-              <p className="text-2xl font-bold text-sky-700">{CATEGORIES.length}</p>
+              <p className="text-2xl font-bold text-sky-700">{categories.length}</p>
               <p className="text-sm text-gray-500 mt-0.5">Categories</p>
             </div>
             <div className="bg-white rounded-2xl border border-gray-100 p-4 shadow-sm">
@@ -475,7 +549,7 @@ export default function DentalServicesPage() {
                 onChange={e => setForm(f => ({ ...f, category: e.target.value }))}
                 className="w-full appearance-none px-3.5 py-2.5 pr-9 border border-gray-200 rounded-xl focus:outline-none focus:ring-2 focus:ring-sky-300 text-sm bg-white"
               >
-                {CATEGORIES.map(c => <option key={c} value={c}>{c}</option>)}
+                {categories.map(c => <option key={c} value={c}>{c}</option>)}
               </select>
               <ChevronDown className="pointer-events-none absolute right-3 top-1/2 -translate-y-1/2 w-4 h-4 text-gray-400" />
             </div>
@@ -520,6 +594,40 @@ export default function DentalServicesPage() {
             >
               {saving && <div className="w-4 h-4 border-2 border-white/30 border-t-white rounded-full animate-spin" />}
               {editService ? 'Save Changes' : 'Add Service'}
+            </button>
+          </div>
+        </form>
+      </Modal>
+
+      <Modal isOpen={showCategoryForm} onClose={() => setShowCategoryForm(false)} title="Add Category" size="sm">
+        <form onSubmit={handleAddCategory} className="space-y-4">
+          <div>
+            <label className="block text-sm font-medium text-gray-700 mb-1.5">Category Name *</label>
+            <input
+              required
+              type="text"
+              value={newCategoryName}
+              onChange={e => setNewCategoryName(e.target.value)}
+              placeholder="e.g. Preventive Care"
+              className="w-full px-3.5 py-2.5 border border-gray-200 rounded-xl focus:outline-none focus:ring-2 focus:ring-sky-300 text-sm"
+            />
+          </div>
+
+          <div className="flex gap-3 justify-end pt-2">
+            <button
+              type="button"
+              onClick={() => setShowCategoryForm(false)}
+              className="px-4 py-2.5 text-gray-700 bg-gray-100 hover:bg-gray-200 rounded-xl transition-colors text-sm"
+            >
+              Cancel
+            </button>
+            <button
+              type="submit"
+              disabled={savingCategory}
+              className="px-6 py-2.5 bg-sky-600 text-white rounded-xl hover:bg-sky-700 transition-colors text-sm font-medium disabled:opacity-60 flex items-center gap-2"
+            >
+              {savingCategory && <div className="w-4 h-4 border-2 border-white/30 border-t-white rounded-full animate-spin" />}
+              Add Category
             </button>
           </div>
         </form>
