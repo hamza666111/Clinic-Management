@@ -72,7 +72,9 @@ export default function AppointmentsPage() {
   useEffect(() => { fetchAppointments(); }, [fetchAppointments]);
   useEffect(() => {
     const cid = profile?.role !== 'admin' && profile?.clinic_id ? profile.clinic_id : null;
-    const pQ = cid ? supabase.from('patients').select('id, name').eq('clinic_id', cid).order('name') : supabase.from('patients').select('id, name').order('name');
+    const pQ = cid
+      ? supabase.from('patients').select('id, name, clinic_id, doctor_id').eq('clinic_id', cid).order('name')
+      : supabase.from('patients').select('id, name, clinic_id, doctor_id').order('name');
     const dQ = cid ? supabase.from('users_profile').select('*').eq('role', 'doctor').eq('clinic_id', cid) : supabase.from('users_profile').select('*').eq('role', 'doctor');
     pQ.then(({ data }) => setPatients(data || []));
     supabase.from('clinics').select('*').then(({ data }) => setClinics(data || []));
@@ -188,7 +190,11 @@ export default function AppointmentsPage() {
     e.preventDefault();
     if (!form.patient_id) { toast.error('Please select a patient.'); return; }
     setSaving(true);
-    const payload = { ...form, doctor_id: form.doctor_id || null, clinic_id: form.clinic_id || null };
+    const payload = {
+      ...form,
+      doctor_id: profile?.role === 'doctor' ? profile.id : (form.doctor_id || null),
+      clinic_id: form.clinic_id || null,
+    };
     const { error } = editAppt
       ? await supabase.from('appointments').update(payload).eq('id', editAppt.id)
       : await supabase.from('appointments').insert(payload);
@@ -337,7 +343,21 @@ export default function AppointmentsPage() {
                 <ChevronDown className={`w-3 h-3 transition-transform ${showNewPatient ? 'rotate-180' : ''}`} />
               </button>
             </div>
-            <select required value={form.patient_id} onChange={e => setForm({...form, patient_id: e.target.value})} className="w-full px-3.5 py-2.5 border border-gray-200 rounded-xl focus:outline-none focus:ring-2 focus:ring-sky-300 text-sm">
+            <select
+              required
+              value={form.patient_id}
+              onChange={e => {
+                const patientId = e.target.value;
+                const selectedPatient = patients.find(p => p.id === patientId);
+                setForm(prev => ({
+                  ...prev,
+                  patient_id: patientId,
+                  clinic_id: selectedPatient?.clinic_id || '',
+                  doctor_id: profile?.role === 'doctor' ? (profile.id || '') : (selectedPatient?.doctor_id || ''),
+                }));
+              }}
+              className="w-full px-3.5 py-2.5 border border-gray-200 rounded-xl focus:outline-none focus:ring-2 focus:ring-sky-300 text-sm"
+            >
               <option value="">Select Patient</option>
               {patients.map(p => <option key={p.id} value={p.id}>{p.name}</option>)}
             </select>

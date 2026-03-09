@@ -450,8 +450,8 @@ export default function BillingPage() {
                   setForm(prev => ({
                     ...prev,
                     patient_id: patientId,
-                    clinic_id: selectedPatient?.clinic_id || prev.clinic_id,
-                    doctor_id: selectedPatient?.doctor_id || prev.doctor_id,
+                    clinic_id: selectedPatient?.clinic_id || '',
+                    doctor_id: selectedPatient?.doctor_id || '',
                   }));
                 }}
                 className="w-full px-3.5 py-2.5 border border-gray-200 rounded-xl focus:outline-none focus:ring-2 focus:ring-sky-300 text-sm"
