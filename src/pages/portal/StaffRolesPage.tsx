@@ -1,9 +1,8 @@
-import { useEffect, useMemo, useState } from 'react';
+import { useCallback, useEffect, useMemo, useState } from 'react';
 import { useNavigate } from 'react-router-dom';
-import { supabase } from '../../lib/supabase';
-import { useAuth } from '../../contexts/AuthContext';
-import { Plus, Lock, Users } from 'lucide-react';
+import { Lock, Plus, Users } from 'lucide-react';
 import toast from 'react-hot-toast';
+import { useAuth } from '../../contexts/AuthContext';
 import {
   LEGACY_PERMISSION_KEY_MAP,
   PERMISSION_DEFINITIONS,
@@ -12,6 +11,7 @@ import {
   mergePermissionsWithDefaults,
   resolvePermissionKeys,
 } from '../../lib/portalPermissions';
+import { supabase } from '../../lib/supabase';
 
 interface ClinicOption {
   id: string;
@@ -40,11 +40,31 @@ interface TeamMember {
   clinic_id: string | null;
 }
 
+interface LegacyRoleRow {
+  id: string;
+  role_name: string;
+  is_default: boolean | null;
+  clinic_id: string | null;
+}
+
+interface ModernPermissionRow {
+  permission_key: string | null;
+  can_read: boolean | null;
+  can_write: boolean | null;
+}
+
+interface LegacyPermissionRow {
+  page_key: string | null;
+  can_view: boolean | null;
+  can_edit: boolean | null;
+  can_delete: boolean | null;
+}
+
 type StaffTab = 'team' | 'permissions';
 type RoleSchemaMode = 'roles' | 'clinic_roles';
 type PermissionSchemaMode = 'modern' | 'legacy';
 
-const ROLE_PRIORITY = ['admin', 'doctor', 'assistant', 'receptionist', 'clinic_admin'];
+const ROLE_PRIORITY = ['admin', 'manager', 'doctor', 'assistant', 'receptionist', 'barber', 'clinic_admin'];
 
 type SupabaseLikeError = {
   message?: string;
@@ -65,7 +85,7 @@ const isMissingTableError = (errorLike: SupabaseLikeError | string | null | unde
       msg.includes(`public.${tableName}`) ||
       msg.includes(`relation "${tableName}"`) ||
       msg.includes(`table '${tableName}'`) ||
-      msg.includes(`table \"public.${tableName}\"`) ||
+      msg.includes(`table "public.${tableName}"`) ||
       msg.includes(`could not find the table 'public.${tableName}'`) ||
       (msg.includes('not found') && msg.includes(tableName))
     );
@@ -87,7 +107,7 @@ const isMissingColumnError = (message: string, column: string) => {
   return msg.includes(column.toLowerCase()) && (msg.includes('column') || msg.includes('does not exist'));
 };
 
-const normalizeRoleLabel = (role: string) => role.replace('_', ' ').replace(/\b\w/g, (c) => c.toUpperCase());
+const normalizeRoleLabel = (role: string) => role.replace(/_/g, ' ').replace(/\b\w/g, (c) => c.toUpperCase());
 
 const sortRoles = (roleList: Role[]) => {
   return [...roleList].sort((a, b) => {
@@ -124,6 +144,17 @@ function buildPermissionState(roleName: string, overrides: Record<string, boolea
   return state;
 }
 
+const getErrorMessage = (error: unknown) => {
+  if (error && typeof error === 'object' && 'message' in error) {
+    const message = (error as { message?: unknown }).message;
+    if (typeof message === 'string') {
+      return message;
+    }
+  }
+
+  return 'Unknown error';
+};
+
 export default function StaffRolesPage() {
   const navigate = useNavigate();
   const { profile, refreshProfile } = useAuth();
@@ -132,10 +163,10 @@ export default function StaffRolesPage() {
 
   const [clinics, setClinics] = useState<ClinicOption[]>([]);
   const [selectedClinicId, setSelectedClinicId] = useState('');
+  const [loadingClinics, setLoadingClinics] = useState(true);
 
   const [team, setTeam] = useState<TeamMember[]>([]);
   const [teamLoading, setTeamLoading] = useState(false);
-  const [selectedMember, setSelectedMember] = useState<TeamMember | null>(null);
 
   const [roles, setRoles] = useState<Role[]>([]);
   const [selectedRole, setSelectedRole] = useState<Role | null>(null);
@@ -145,41 +176,39 @@ export default function StaffRolesPage() {
   const [permissions, setPermissions] = useState<Record<string, Permission>>({});
   const [permissionSchemaMode, setPermissionSchemaMode] = useState<PermissionSchemaMode>('modern');
   const [savingPermissions, setSavingPermissions] = useState(false);
-  const [assigningRole, setAssigningRole] = useState(false);
 
   const [newRoleName, setNewRoleName] = useState('');
   const [isAddingRole, setIsAddingRole] = useState(false);
 
+  const isAdmin = profile?.role === 'admin';
   const hasMultipleClinics = clinics.length > 1;
+  const requiresClinicSelection = isAdmin && hasMultipleClinics && !selectedClinicId;
 
   const effectiveClinicId = useMemo(() => {
-    if (!profile) return null;
+    if (!profile?.role) return null;
     if (profile.role === 'admin') return selectedClinicId || null;
     return profile.clinic_id || null;
   }, [profile?.role, profile?.clinic_id, selectedClinicId]);
 
   const selectedClinicName = useMemo(() => {
-    if (!selectedClinicId) return 'All Clinics';
-    return clinics.find((c) => c.id === selectedClinicId)?.clinic_name || 'Selected Clinic';
-  }, [clinics, selectedClinicId]);
+    if (!selectedClinicId) {
+      if (isAdmin && hasMultipleClinics) return 'No Clinic Selected';
+      return clinics[0]?.clinic_name || 'My Clinic';
+    }
 
-  const findRoleByName = (roleName?: string | null) => {
-    if (!roleName) return null;
-    const normalizedRole = roleName.trim().toLowerCase();
+    return clinics.find((clinic) => clinic.id === selectedClinicId)?.clinic_name || 'Selected Clinic';
+  }, [selectedClinicId, clinics, isAdmin, hasMultipleClinics]);
 
-    return (
-      roles.find((role) => role.name === normalizedRole && role.clinic_id === effectiveClinicId) ||
-      roles.find((role) => role.name === normalizedRole && !role.is_system_default) ||
-      roles.find((role) => role.name === normalizedRole && role.is_system_default) ||
-      roles.find((role) => role.name === normalizedRole) ||
-      null
-    );
-  };
+  const enabledPermissionCount = useMemo(() => {
+    return PERMISSION_DEFINITIONS.filter((perm) => permissions[perm.key]?.can_read).length;
+  }, [permissions]);
 
-  const fetchClinics = async () => {
+  const fetchClinics = useCallback(async () => {
     if (!profile) return;
 
     try {
+      setLoadingClinics(true);
+
       let query = supabase.from('clinics').select('id, clinic_name').order('clinic_name');
 
       if (profile.role !== 'admin' && profile.clinic_id) {
@@ -201,19 +230,26 @@ export default function StaffRolesPage() {
           return prev;
         }
 
-        return clinicRows[0]?.id || '';
+        if (clinicRows.length === 1) {
+          return clinicRows[0].id;
+        }
+
+        return '';
       });
-    } catch (err: any) {
+    } catch (err: unknown) {
       if (profile.clinic_id) {
         setClinics([{ id: profile.clinic_id, clinic_name: 'My Clinic' }]);
         setSelectedClinicId(profile.clinic_id);
       }
-      toast.error('Failed to load clinics: ' + err.message);
+      toast.error('Failed to load clinics: ' + getErrorMessage(err));
+    } finally {
+      setLoadingClinics(false);
     }
-  };
+  }, [profile]);
 
-  const fetchRoles = async () => {
+  const fetchRoles = useCallback(async () => {
     if (!profile) return;
+    if (requiresClinicSelection) return;
 
     try {
       setLoadingRoles(true);
@@ -262,7 +298,7 @@ export default function StaffRolesPage() {
           normalizedRoles = (modernResult.data || []) as Role[];
         } else {
           setRoleSchemaMode('clinic_roles');
-          normalizedRoles = (legacyResult.data || []).map((row: any) => ({
+          normalizedRoles = ((legacyResult.data || []) as LegacyRoleRow[]).map((row) => ({
             id: row.id,
             name: row.role_name,
             is_system_default: Boolean(row.is_default),
@@ -281,7 +317,7 @@ export default function StaffRolesPage() {
           if (legacyResult.error) throw legacyResult.error;
 
           setRoleSchemaMode('clinic_roles');
-          normalizedRoles = (legacyResult.data || []).map((row: any) => ({
+          normalizedRoles = ((legacyResult.data || []) as LegacyRoleRow[]).map((row) => ({
             id: row.id,
             name: row.role_name,
             is_system_default: Boolean(row.is_default),
@@ -296,20 +332,26 @@ export default function StaffRolesPage() {
       const sortedRoles = sortRoles(normalizedRoles);
       setRoles(sortedRoles);
 
+      if (!sortedRoles.length) {
+        setSelectedRole(null);
+        setPermissions({});
+        return;
+      }
+
       setSelectedRole((prev) => {
-        if (!sortedRoles.length) return null;
         if (!prev) return sortedRoles[0];
-        return sortedRoles.find((role) => role.id === prev.id) || prev || sortedRoles[0];
+        return sortedRoles.find((role) => role.id === prev.id) || sortedRoles[0];
       });
-    } catch (err: any) {
-      toast.error('Failed to load roles: ' + err.message);
+    } catch (err: unknown) {
+      toast.error('Failed to load roles: ' + getErrorMessage(err));
     } finally {
       setLoadingRoles(false);
     }
-  };
+  }, [profile, requiresClinicSelection, effectiveClinicId, roleSchemaMode]);
 
-  const fetchTeam = async () => {
+  const fetchTeam = useCallback(async () => {
     if (!profile) return;
+    if (requiresClinicSelection) return;
 
     try {
       setTeamLoading(true);
@@ -326,22 +368,15 @@ export default function StaffRolesPage() {
       const { data, error } = await query;
       if (error) throw error;
 
-      const members = (data || []) as TeamMember[];
-      setTeam(members);
-
-      setSelectedMember((prev) => {
-        if (!members.length) return null;
-        if (!prev) return members[0];
-        return members.find((member) => member.id === prev.id) || members[0];
-      });
-    } catch (err: any) {
-      toast.error('Failed to load team: ' + err.message);
+      setTeam((data || []) as TeamMember[]);
+    } catch (err: unknown) {
+      toast.error('Failed to load team: ' + getErrorMessage(err));
     } finally {
       setTeamLoading(false);
     }
-  };
+  }, [profile, requiresClinicSelection, effectiveClinicId]);
 
-  const fetchPermissions = async (roleId: string, roleName: string) => {
+  const fetchPermissions = useCallback(async (roleId: string, roleName: string) => {
     try {
       const modernResult = await supabase
         .from('role_permissions')
@@ -350,7 +385,9 @@ export default function StaffRolesPage() {
 
       if (!modernResult.error) {
         const overrides: Record<string, boolean> = {};
-        modernResult.data?.forEach((row: any) => {
+        const modernRows = (modernResult.data || []) as ModernPermissionRow[];
+
+        modernRows.forEach((row) => {
           const enabled = Boolean(row.can_read || row.can_write);
           const keys = resolvePermissionKeys(String(row.permission_key || ''));
 
@@ -393,7 +430,9 @@ export default function StaffRolesPage() {
       if (legacyResult.error) throw legacyResult.error;
 
       const overrides: Record<string, boolean> = {};
-      legacyResult.data?.forEach((row: any) => {
+      const legacyRows = (legacyResult.data || []) as LegacyPermissionRow[];
+
+      legacyRows.forEach((row) => {
         const enabled = Boolean(row.can_view || row.can_edit || row.can_delete);
         const keys = resolvePermissionKeys(String(row.page_key || ''));
         keys.forEach((key) => {
@@ -403,48 +442,47 @@ export default function StaffRolesPage() {
 
       setPermissionSchemaMode('legacy');
       setPermissions(buildPermissionState(roleName, overrides));
-    } catch (err: any) {
-      toast.error('Failed to load permissions: ' + err.message);
+    } catch (err: unknown) {
+      toast.error('Failed to load permissions: ' + getErrorMessage(err));
     }
-  };
+  }, []);
 
   useEffect(() => {
-    if (profile) {
-      void fetchClinics();
+    if (!profile) {
+      setClinics([]);
+      setSelectedClinicId('');
+      setLoadingClinics(false);
+      return;
     }
-  }, [profile?.id, profile?.role, profile?.clinic_id]);
+
+    void fetchClinics();
+  }, [profile, fetchClinics]);
 
   useEffect(() => {
-    if (!profile) return;
-    if (profile.role === 'admin' && hasMultipleClinics && !selectedClinicId) return;
+    if (!profile || loadingClinics) return;
 
-    void fetchTeam();
-    void fetchRoles();
-  }, [profile?.id, profile?.role, profile?.clinic_id, selectedClinicId, hasMultipleClinics]);
-
-  useEffect(() => {
-    if (activeTab !== 'permissions') return;
-
-    if (!selectedMember) {
+    if (requiresClinicSelection) {
+      setTeam([]);
+      setRoles([]);
       setSelectedRole(null);
       setPermissions({});
       return;
     }
 
-    const matchedRole = findRoleByName(selectedMember.role);
-    setSelectedRole(matchedRole);
-
-    if (!matchedRole) {
-      setPermissionSchemaMode('modern');
-      setPermissions(buildPermissionState(selectedMember.role, getDefaultPermissionsForRole(selectedMember.role)));
-    }
-  }, [activeTab, selectedMember?.id, selectedMember?.role, roles, effectiveClinicId]);
+    void fetchTeam();
+    void fetchRoles();
+  }, [profile, loadingClinics, selectedClinicId, requiresClinicSelection, fetchRoles, fetchTeam]);
 
   useEffect(() => {
-    if (activeTab === 'permissions' && selectedRole) {
-      void fetchPermissions(selectedRole.id, selectedRole.name);
+    if (activeTab !== 'permissions') return;
+
+    if (!selectedRole) {
+      setPermissions({});
+      return;
     }
-  }, [activeTab, selectedRole?.id]);
+
+    void fetchPermissions(selectedRole.id, selectedRole.name);
+  }, [activeTab, selectedRole, fetchPermissions]);
 
   const togglePermission = (key: PermissionKey) => {
     setPermissions((prev) => {
@@ -489,9 +527,7 @@ export default function StaffRolesPage() {
 
         if (deleteLegacyError) throw deleteLegacyError;
 
-        const { error: insertLegacyError } = await supabase
-          .from('role_permissions')
-          .insert(legacyRows);
+        const { error: insertLegacyError } = await supabase.from('role_permissions').insert(legacyRows);
 
         if (insertLegacyError) throw insertLegacyError;
       } else {
@@ -512,9 +548,7 @@ export default function StaffRolesPage() {
 
         if (deleteModernError) throw deleteModernError;
 
-        const { error: insertModernError } = await supabase
-          .from('role_permissions')
-          .insert(rows);
+        const { error: insertModernError } = await supabase.from('role_permissions').insert(rows);
 
         if (insertModernError) throw insertModernError;
       }
@@ -522,40 +556,10 @@ export default function StaffRolesPage() {
       await refreshProfile();
       await fetchPermissions(selectedRole.id, selectedRole.name);
       toast.success('Permissions saved successfully');
-    } catch (err: any) {
-      toast.error('Failed to save permissions: ' + err.message);
+    } catch (err: unknown) {
+      toast.error('Failed to save permissions: ' + getErrorMessage(err));
     } finally {
       setSavingPermissions(false);
-    }
-  };
-
-  const handleAssignRoleToMember = async () => {
-    if (!selectedMember || !selectedRole) {
-      toast.error('Select a team member and a role first');
-      return;
-    }
-
-    try {
-      setAssigningRole(true);
-
-      const { error } = await supabase.functions.invoke('create-user', {
-        body: {
-          action: 'update_profile',
-          user_id: selectedMember.id,
-          role: selectedRole.name,
-          clinic_id: selectedMember.clinic_id ?? effectiveClinicId ?? null,
-        },
-      });
-
-      if (error) throw new Error(error.message || 'Failed to update team member role');
-
-      await fetchTeam();
-      await refreshProfile();
-      toast.success(`Updated ${selectedMember.name}'s role to ${normalizeRoleLabel(selectedRole.name)}`);
-    } catch (err: any) {
-      toast.error('Failed to update member role: ' + err.message);
-    } finally {
-      setAssigningRole(false);
     }
   };
 
@@ -568,12 +572,7 @@ export default function StaffRolesPage() {
       return;
     }
 
-    if (profile?.role === 'admin' && hasMultipleClinics && !effectiveClinicId) {
-      toast.error('Please select a clinic before adding a role');
-      return;
-    }
-
-    if (roleSchemaMode === 'clinic_roles' && !effectiveClinicId) {
+    if (requiresClinicSelection || (roleSchemaMode === 'clinic_roles' && !effectiveClinicId)) {
       toast.error('Please select a clinic before adding a role');
       return;
     }
@@ -625,213 +624,196 @@ export default function StaffRolesPage() {
       setNewRoleName('');
       setIsAddingRole(false);
       toast.success('Role created successfully');
-    } catch (err: any) {
-      toast.error('Failed to create role: ' + err.message);
+    } catch (err: unknown) {
+      toast.error('Failed to create role: ' + getErrorMessage(err));
     }
   };
 
   return (
-    <div className="max-w-7xl mx-auto space-y-6">
-      <div className="flex flex-wrap justify-between items-center gap-4">
-        <div>
-          <h1 className="text-2xl font-bold text-gray-900">Staff & Roles</h1>
-          <p className="text-sm text-gray-500 mt-1">Manage teams clinic-wise and control page permissions</p>
-        </div>
-
-        <div className="flex items-center gap-3 flex-wrap">
-          <div className="bg-gray-100 p-1 rounded-lg flex text-sm font-medium">
-            <button
-              onClick={() => setActiveTab('team')}
-              className={`px-4 py-2 rounded-md transition-colors ${
-                activeTab === 'team' ? 'bg-white text-indigo-600 shadow-sm' : 'text-gray-500 hover:text-gray-900'
-              }`}
-            >
-              Team
-            </button>
-            <button
-              onClick={() => setActiveTab('permissions')}
-              className={`px-4 py-2 rounded-md transition-colors ${
-                activeTab === 'permissions' ? 'bg-white text-indigo-600 shadow-sm' : 'text-gray-500 hover:text-gray-900'
-              }`}
-            >
-              Roles & Permissions
-            </button>
-          </div>
-
-          {hasMultipleClinics && (
-            <select
-              value={selectedClinicId}
-              onChange={(e) => setSelectedClinicId(e.target.value)}
-              className="px-3 py-2 text-sm border border-gray-200 rounded-lg focus:ring-2 focus:ring-indigo-500 focus:border-indigo-500"
-            >
-              {clinics.map((clinic) => (
-                <option key={clinic.id} value={clinic.id}>
-                  {clinic.clinic_name}
-                </option>
-              ))}
-            </select>
-          )}
-
-          <button
-            onClick={() => navigate('/portal/users')}
-            className="flex items-center gap-2 bg-indigo-600 text-white px-4 py-2 rounded-lg hover:bg-indigo-700 transition-colors"
-          >
-            <Plus size={18} />
-            <span>Add Staff</span>
-          </button>
-        </div>
-      </div>
-
-      {activeTab === 'team' ? (
-        <div className="bg-white rounded-xl shadow-sm border border-gray-200 overflow-hidden">
-          <div className="p-4 border-b border-gray-100 bg-gray-50 flex items-center justify-between">
-            <h2 className="font-semibold text-gray-700 flex items-center gap-2">
-              <Users size={18} /> Team Members - {selectedClinicName}
-            </h2>
-            <span className="text-sm text-gray-500">{team.length} members</span>
-          </div>
-
-          <div className="p-4">
-            {teamLoading ? (
-              <p className="text-center text-sm text-gray-400 py-8">Loading team...</p>
-            ) : team.length === 0 ? (
-              <p className="text-center text-sm text-gray-400 py-8">No team members found for this clinic</p>
-            ) : (
-              <div className="overflow-x-auto">
-                <table className="w-full text-sm">
-                  <thead>
-                    <tr className="text-left text-gray-500 border-b border-gray-100">
-                      <th className="py-3 px-2 font-medium">Name</th>
-                      <th className="py-3 px-2 font-medium">Email</th>
-                      <th className="py-3 px-2 font-medium">Role</th>
-                      <th className="py-3 px-2 font-medium">Status</th>
-                    </tr>
-                  </thead>
-                  <tbody>
-                    {team.map((member) => (
-                      <tr key={member.id} className="border-b border-gray-50 last:border-0">
-                        <td className="py-3 px-2 font-medium text-gray-900">{member.name}</td>
-                        <td className="py-3 px-2 text-gray-600">{member.email}</td>
-                        <td className="py-3 px-2 text-gray-700">{normalizeRoleLabel(member.role)}</td>
-                        <td className="py-3 px-2">
-                          <span
-                            className={`inline-flex px-2.5 py-1 rounded-full text-xs font-medium ${
-                              member.is_active ? 'bg-emerald-100 text-emerald-700' : 'bg-gray-100 text-gray-600'
-                            }`}
-                          >
-                            {member.is_active ? 'Active' : 'Inactive'}
-                          </span>
-                        </td>
-                      </tr>
-                    ))}
-                  </tbody>
-                </table>
-              </div>
-            )}
-          </div>
-        </div>
-      ) : (
-        <div className="flex gap-6 h-[calc(100vh-13rem)] min-h-[520px]">
-          <div className="w-80 bg-white rounded-xl shadow-sm border border-gray-200 flex flex-col overflow-hidden">
-            <div className="p-4 border-b border-gray-100 bg-gray-50">
-              <h2 className="font-semibold text-gray-700 flex items-center gap-2">
-                <Users size={18} /> Team of {selectedClinicName}
-              </h2>
+    <div className="mx-auto max-w-7xl p-4 md:p-6">
+      <div className="min-h-[calc(100vh-8.5rem)] rounded-3xl border border-[#1a2438] bg-[#050913] text-slate-100 shadow-[0_24px_70px_rgba(2,6,23,0.5)]">
+        <div className="space-y-6 p-5 md:p-8">
+          <div className="flex flex-wrap items-start justify-between gap-4">
+            <div>
+              <h1 className="text-3xl font-semibold tracking-tight text-white">Staff & Roles</h1>
+              <p className="mt-1 text-sm text-slate-400">
+                {teamLoading ? 'Loading team members...' : `${team.length} team members`}
+              </p>
             </div>
 
-            <div className="flex-1 overflow-y-auto p-3 space-y-1">
+            <div className="flex flex-wrap items-center gap-3">
+              <div className="inline-flex rounded-xl border border-[#25304a] bg-[#0c1322] p-1 text-sm font-medium">
+                <button
+                  onClick={() => setActiveTab('team')}
+                  className={`rounded-lg px-5 py-2.5 transition-colors ${
+                    activeTab === 'team' ? 'bg-[#2563eb] text-white' : 'text-slate-400 hover:text-white'
+                  }`}
+                >
+                  Team
+                </button>
+                <button
+                  onClick={() => setActiveTab('permissions')}
+                  className={`rounded-lg px-5 py-2.5 transition-colors ${
+                    activeTab === 'permissions' ? 'bg-[#2563eb] text-white' : 'text-slate-400 hover:text-white'
+                  }`}
+                >
+                  Roles & Permissions
+                </button>
+              </div>
+
+              <button
+                onClick={() => navigate('/portal/users')}
+                className="inline-flex items-center gap-2 rounded-xl bg-[#2563eb] px-5 py-2.5 text-sm font-semibold text-white transition-colors hover:bg-[#1d4ed8]"
+              >
+                <Plus size={16} />
+                Add Staff
+              </button>
+            </div>
+          </div>
+
+          <div className="rounded-2xl border border-[#1f2a41] bg-[#0a1120] p-4">
+            <div className="flex flex-wrap items-end gap-4">
+              <div className="min-w-[240px] flex-1 max-w-sm">
+                <label className="mb-1.5 block text-xs font-semibold uppercase tracking-[0.16em] text-slate-400">
+                  Select Clinic First
+                </label>
+                <select
+                  value={selectedClinicId}
+                  onChange={(e) => setSelectedClinicId(e.target.value)}
+                  disabled={loadingClinics || !isAdmin || !hasMultipleClinics}
+                  className="w-full rounded-xl border border-[#2a3755] bg-[#10192d] px-3 py-2.5 text-sm text-slate-100 outline-none transition focus:border-[#3b82f6] focus:ring-2 focus:ring-[#3b82f6]/30 disabled:cursor-not-allowed disabled:opacity-60"
+                >
+                  {isAdmin && hasMultipleClinics && <option value="">Choose a clinic</option>}
+                  {clinics.map((clinic) => (
+                    <option key={clinic.id} value={clinic.id}>
+                      {clinic.clinic_name}
+                    </option>
+                  ))}
+                </select>
+              </div>
+
+              <p className="pb-1 text-sm text-slate-300">
+                Managing: <span className="font-semibold text-white">{selectedClinicName}</span>
+              </p>
+            </div>
+          </div>
+
+          {loadingClinics ? (
+            <div className="rounded-2xl border border-[#1f2a41] bg-[#0a1120] p-10 text-center text-slate-400">Loading clinics...</div>
+          ) : requiresClinicSelection ? (
+            <div className="rounded-2xl border border-[#1f2a41] bg-[#0a1120] p-10 text-center">
+              <h2 className="text-xl font-semibold text-white">Select a clinic to continue</h2>
+              <p className="mt-2 text-sm text-slate-400">
+                Choose a clinic from the dropdown above, then manage staff and role permissions.
+              </p>
+            </div>
+          ) : activeTab === 'team' ? (
+            <div className="overflow-hidden rounded-2xl border border-[#1f2a41] bg-[#0a1120]">
+              <div className="flex items-center justify-between border-b border-[#1f2a41] px-5 py-4">
+                <h2 className="flex items-center gap-2 text-base font-semibold text-white">
+                  <Users size={18} />
+                  Team - {selectedClinicName}
+                </h2>
+                <span className="text-sm text-slate-400">{team.length} members</span>
+              </div>
+
               {teamLoading ? (
-                <p className="text-center text-sm text-gray-400 py-4">Loading team...</p>
+                <p className="py-10 text-center text-sm text-slate-400">Loading team...</p>
               ) : team.length === 0 ? (
-                <p className="text-center text-sm text-gray-400 py-4">No team members in this clinic</p>
+                <p className="py-10 text-center text-sm text-slate-400">No team members found for this clinic.</p>
               ) : (
-                team.map((member) => (
-                  <button
-                    key={member.id}
-                    onClick={() => setSelectedMember(member)}
-                    className={`w-full text-left px-4 py-3 rounded-lg text-sm transition-colors border ${
-                      selectedMember?.id === member.id
-                        ? 'bg-indigo-50 border-indigo-200 text-indigo-700'
-                        : 'bg-white border-transparent text-gray-700 hover:bg-gray-50'
-                    }`}
-                  >
-                    <p className="font-semibold truncate">{member.name}</p>
-                    <p className="text-xs text-gray-500 truncate">{member.email}</p>
-                    <p className="text-xs mt-1">{normalizeRoleLabel(member.role)}</p>
-                  </button>
-                ))
+                <div className="overflow-x-auto">
+                  <table className="min-w-full text-sm">
+                    <thead>
+                      <tr className="text-left text-slate-400">
+                        <th className="px-5 py-3 font-medium">Name</th>
+                        <th className="px-5 py-3 font-medium">Email</th>
+                        <th className="px-5 py-3 font-medium">Role</th>
+                        <th className="px-5 py-3 font-medium">Status</th>
+                      </tr>
+                    </thead>
+                    <tbody>
+                      {team.map((member) => (
+                        <tr key={member.id} className="border-t border-[#1f2a41]">
+                          <td className="px-5 py-3 font-medium text-white">{member.name}</td>
+                          <td className="px-5 py-3 text-slate-300">{member.email}</td>
+                          <td className="px-5 py-3 text-slate-200">{normalizeRoleLabel(member.role)}</td>
+                          <td className="px-5 py-3">
+                            <span
+                              className={`inline-flex rounded-full px-2.5 py-1 text-xs font-medium ${
+                                member.is_active
+                                  ? 'bg-emerald-500/20 text-emerald-300'
+                                  : 'bg-slate-500/20 text-slate-300'
+                              }`}
+                            >
+                              {member.is_active ? 'Active' : 'Inactive'}
+                            </span>
+                          </td>
+                        </tr>
+                      ))}
+                    </tbody>
+                  </table>
+                </div>
               )}
             </div>
-          </div>
+          ) : (
+            <div className="grid gap-5 xl:grid-cols-[290px_minmax(0,1fr)]">
+              <aside className="overflow-hidden rounded-2xl border border-[#1f2a41] bg-[#0a1120]">
+                <div className="flex items-center justify-between border-b border-[#1f2a41] px-4 py-4">
+                  <h2 className="text-lg font-semibold text-white">Roles</h2>
+                  <button
+                    onClick={() => setIsAddingRole((prev) => !prev)}
+                    className="inline-flex items-center gap-1 rounded-lg border border-[#2a3a5e] bg-[#10192d] px-2.5 py-1.5 text-xs font-medium text-slate-200 transition hover:border-[#3b82f6]"
+                  >
+                    <Plus size={14} />
+                    Role
+                  </button>
+                </div>
 
-          <div className="flex-1 bg-white rounded-xl shadow-sm border border-gray-200 flex flex-col overflow-hidden">
-            {selectedMember ? (
-              <>
-                <div className="p-6 border-b border-gray-100 space-y-4">
-                  <div className="flex flex-wrap items-start justify-between gap-4">
-                    <div>
-                      <h2 className="text-xl font-bold text-gray-900">Permissions for: {selectedMember.name}</h2>
-                      <p className="text-sm text-gray-500 mt-1">Toggle access to dashboard and all portal pages</p>
-                    </div>
-
-                    <button
-                      onClick={() => void savePermissions()}
-                      disabled={savingPermissions || !selectedRole}
-                      className="bg-indigo-600 text-white px-6 py-2 rounded-lg hover:bg-indigo-700 font-medium transition-colors disabled:opacity-50"
-                    >
-                      {savingPermissions ? 'Saving...' : 'Save Permissions'}
-                    </button>
-                  </div>
-
-                  <div className="flex flex-wrap items-center gap-3">
-                    <div className="min-w-[240px]">
-                      <label className="block text-xs font-semibold text-gray-500 mb-1">Existing Roles</label>
-                      <select
-                        value={selectedRole?.id || ''}
-                        onChange={(e) => {
-                          const role = roles.find((item) => item.id === e.target.value) || null;
-                          setSelectedRole(role);
-                        }}
-                        className="w-full px-3 py-2 text-sm border border-gray-200 rounded-lg focus:ring-2 focus:ring-indigo-500 focus:border-indigo-500"
+                <div className="max-h-[580px] space-y-2 overflow-y-auto p-3">
+                  {loadingRoles ? (
+                    <p className="px-2 py-3 text-sm text-slate-400">Loading roles...</p>
+                  ) : roles.length === 0 ? (
+                    <p className="px-2 py-3 text-sm text-slate-400">No roles found for this clinic.</p>
+                  ) : (
+                    roles.map((role) => (
+                      <button
+                        key={role.id}
+                        onClick={() => setSelectedRole(role)}
+                        className={`w-full rounded-xl border px-3 py-3 text-left transition ${
+                          selectedRole?.id === role.id
+                            ? 'border-[#2f5fcc] bg-[#13213f] text-blue-100'
+                            : 'border-transparent bg-[#0f182a] text-slate-200 hover:border-[#2a3a5e]'
+                        }`}
                       >
-                        <option value="">Select role</option>
-                        {roles.map((role) => (
-                          <option key={role.id} value={role.id}>
-                            {normalizeRoleLabel(role.name)}{role.is_system_default ? ' (System)' : ''}
-                          </option>
-                        ))}
-                      </select>
-                    </div>
+                        <div className="flex items-center justify-between gap-2">
+                          <span className="font-medium">{normalizeRoleLabel(role.name)}</span>
+                          {role.is_system_default && (
+                            <span className="inline-flex items-center gap-1 rounded-full bg-slate-700/40 px-2 py-0.5 text-[10px] uppercase tracking-wide text-slate-300">
+                              <Lock size={10} />
+                              System
+                            </span>
+                          )}
+                        </div>
+                      </button>
+                    ))
+                  )}
+                </div>
 
-                    <button
-                      onClick={() => void handleAssignRoleToMember()}
-                      disabled={assigningRole || !selectedRole}
-                      className="mt-5 bg-slate-900 text-white px-4 py-2 rounded-lg hover:bg-slate-800 text-sm disabled:opacity-50"
-                    >
-                      {assigningRole ? 'Updating Role...' : 'Assign Role To Member'}
-                    </button>
-
-                    <button
-                      onClick={() => setIsAddingRole((prev) => !prev)}
-                      className="mt-5 flex items-center gap-2 bg-indigo-100 text-indigo-700 px-4 py-2 rounded-lg hover:bg-indigo-200 text-sm"
-                    >
-                      <Plus size={16} /> Add Role
-                    </button>
-                  </div>
-
-                  {isAddingRole && (
-                    <div className="flex flex-wrap items-center gap-2">
-                      <input
-                        type="text"
-                        value={newRoleName}
-                        onChange={(e) => setNewRoleName(e.target.value)}
-                        onKeyDown={(e) => e.key === 'Enter' && void handleAddRole()}
-                        placeholder="e.g. senior_assistant"
-                        className="px-3 py-2 text-sm border border-gray-200 rounded-lg min-w-[240px] focus:ring-2 focus:ring-indigo-500 focus:border-indigo-500"
-                      />
+                {isAddingRole && (
+                  <div className="space-y-2 border-t border-[#1f2a41] p-3">
+                    <input
+                      type="text"
+                      value={newRoleName}
+                      onChange={(e) => setNewRoleName(e.target.value)}
+                      onKeyDown={(e) => e.key === 'Enter' && void handleAddRole()}
+                      placeholder="e.g. manager"
+                      className="w-full rounded-lg border border-[#2a3a5e] bg-[#10192d] px-3 py-2 text-sm text-white outline-none transition focus:border-[#3b82f6]"
+                    />
+                    <div className="flex items-center gap-2">
                       <button
                         onClick={() => void handleAddRole()}
-                        className="bg-indigo-600 text-white px-4 py-2 rounded-lg hover:bg-indigo-700 text-sm"
+                        className="rounded-lg bg-[#2563eb] px-3 py-1.5 text-xs font-semibold text-white transition hover:bg-[#1d4ed8]"
                       >
                         Save Role
                       </button>
@@ -840,52 +822,61 @@ export default function StaffRolesPage() {
                           setIsAddingRole(false);
                           setNewRoleName('');
                         }}
-                        className="px-4 py-2 text-sm text-gray-600 hover:text-gray-900"
+                        className="rounded-lg border border-[#2a3a5e] px-3 py-1.5 text-xs font-medium text-slate-300 transition hover:text-white"
                       >
                         Cancel
                       </button>
                     </div>
-                  )}
-                </div>
+                  </div>
+                )}
+              </aside>
 
-                <div className="flex-1 overflow-y-auto p-6">
-                  {loadingRoles ? (
-                    <p className="text-center text-sm text-gray-400 py-10">Loading roles...</p>
-                  ) : !selectedRole ? (
-                    <p className="text-center text-sm text-gray-400 py-10">Select a role to view permissions</p>
-                  ) : (
-                    <div className="space-y-4 max-w-3xl">
-                      <div className="flex items-center gap-3 pb-2">
-                        <h3 className="font-semibold text-gray-900">Role: {normalizeRoleLabel(selectedRole.name)}</h3>
-                        {selectedRole.is_system_default && (
-                          <span className="text-xs font-normal bg-gray-100 text-gray-500 px-2 py-1 rounded-full flex items-center gap-1">
-                            <Lock size={10} /> System Default
-                          </span>
-                        )}
+              <section className="overflow-hidden rounded-2xl border border-[#1f2a41] bg-[#0a1120]">
+                {loadingRoles ? (
+                  <p className="py-16 text-center text-sm text-slate-400">Loading permissions...</p>
+                ) : !selectedRole ? (
+                  <p className="py-16 text-center text-sm text-slate-400">Select a role to manage permissions.</p>
+                ) : (
+                  <>
+                    <div className="flex flex-wrap items-start justify-between gap-4 border-b border-[#1f2a41] px-5 py-5">
+                      <div>
+                        <h2 className="text-2xl font-semibold text-white">
+                          Permissions for: {normalizeRoleLabel(selectedRole.name)}
+                        </h2>
+                        <p className="mt-1 text-sm text-slate-400">
+                          {enabledPermissionCount} of {PERMISSION_DEFINITIONS.length} permissions enabled
+                        </p>
                       </div>
 
+                      <button
+                        onClick={() => void savePermissions()}
+                        disabled={savingPermissions}
+                        className="rounded-xl bg-[#2563eb] px-5 py-2.5 text-sm font-semibold text-white transition hover:bg-[#1d4ed8] disabled:cursor-not-allowed disabled:opacity-60"
+                      >
+                        {savingPermissions ? 'Saving...' : 'Save Changes'}
+                      </button>
+                    </div>
+
+                    <div className="divide-y divide-[#1f2a41] px-5">
                       {PERMISSION_DEFINITIONS.map((perm) => {
                         const isActive = permissions[perm.key]?.can_read || false;
                         return (
-                          <div
-                            key={perm.key}
-                            className="flex items-center justify-between pb-4 border-b border-gray-50 last:border-0 hover:bg-gray-50 p-2 rounded-lg transition-colors"
-                          >
+                          <div key={perm.key} className="flex items-center justify-between gap-4 py-4">
                             <div>
-                              <h4 className="font-semibold text-gray-800">{perm.label}</h4>
-                              <p className="text-sm text-gray-500">{perm.desc}</p>
+                              <h3 className="text-lg font-semibold text-white">{perm.label}</h3>
+                              <p className="text-sm text-slate-400">{perm.desc}</p>
                             </div>
 
                             <button
                               role="switch"
                               aria-checked={isActive}
                               onClick={() => togglePermission(perm.key)}
-                              className={`relative inline-flex h-6 w-11 items-center rounded-full transition-colors focus:outline-none focus:ring-2 focus:ring-indigo-500 focus:ring-offset-2 ${
-                                isActive ? 'bg-indigo-600' : 'bg-gray-200'
+                              className={`relative inline-flex h-7 w-12 items-center rounded-full transition-colors focus:outline-none focus:ring-2 focus:ring-[#3b82f6] focus:ring-offset-2 focus:ring-offset-[#0a1120] ${
+                                isActive ? 'bg-[#2563eb]' : 'bg-[#25324f]'
                               }`}
                             >
                               <span
-                                className={`inline-block h-4 w-4 transform rounded-full bg-white transition-transform ${
+                                className={`inline-block h-5 w-5 transform rounded-full bg-white transition-transform ${
                                   isActive ? 'translate-x-6' : 'translate-x-1'
                                 }`}
                               />
@@ -894,17 +885,13 @@ export default function StaffRolesPage() {
                         );
                       })}
                     </div>
-                  )}
-                </div>
-              </>
-            ) : (
-              <div className="flex-1 flex items-center justify-center text-gray-400">
-                Select a team member to manage permissions
-              </div>
-            )}
-          </div>
+                  </>
+                )}
+              </section>
+            </div>
+          )}
         </div>
-      )}
+      </div>
     </div>
   );
 }
