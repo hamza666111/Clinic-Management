@@ -270,6 +270,17 @@ export default function PatientsPage() {
     if (filesPatient) loadFilesForPatient(filesPatient.id);
   };
 
+  const handleDoctorChange = (doctorId: string) => {
+    setForm(prev => {
+      const selectedDoctor = doctors.find(d => d.id === doctorId);
+      return {
+        ...prev,
+        doctor_id: doctorId,
+        clinic_id: selectedDoctor?.clinic_id || prev.clinic_id,
+      };
+    });
+  };
+
   const filteredDoctors = profile?.clinic_id
     ? doctors.filter(d => d.clinic_id === profile.clinic_id || isAdmin)
     : doctors;
@@ -530,7 +541,7 @@ export default function PatientsPage() {
               <label className="block text-sm font-medium text-gray-700 mb-1.5">Assigned Doctor</label>
               <select
                 value={form.doctor_id}
-                onChange={e => setForm({ ...form, doctor_id: e.target.value })}
+                onChange={e => handleDoctorChange(e.target.value)}
                 className="w-full px-3.5 py-2.5 border border-gray-200 rounded-xl focus:outline-none focus:ring-2 focus:ring-sky-300 text-sm"
                 disabled={isDoctor}
               >

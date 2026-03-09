@@ -27,7 +27,6 @@ const STATUS_LABELS: Record<string, string> = {
 export default function BillingPage() {
   const { profile } = useAuth();
   const toast = useToast();
-  const { serviceNames, services, findByName } = useServices(profile?.clinic_id);
   const printRef = useRef<HTMLDivElement>(null);
 
   const [invoices, setInvoices] = useState<Invoice[]>([]);
@@ -35,7 +34,7 @@ export default function BillingPage() {
   const [search, setSearch] = useState('');
   const [patients, setPatients] = useState<Patient[]>([]);
   const [clinics, setClinics] = useState<Clinic[]>([]);
-  const [doctors, setDoctors] = useState<{ id: string; name: string }[]>([]);
+  const [doctors, setDoctors] = useState<Array<{ id: string; name: string; clinic_id: string | null }>>([]);
 
   const [showForm, setShowForm] = useState(false);
   const [viewInvoice, setViewInvoice] = useState<Invoice | null>(null);
@@ -46,9 +45,32 @@ export default function BillingPage() {
 
   const [paymentForm, setPaymentForm] = useState({ amount_paid: '', status: 'partial' as Invoice['status'] });
 
+  const [form, setForm] = useState({
+    patient_id: '',
+    clinic_id: '',
+    doctor_id: '',
+    doctor_fee: '',
+    amount_paid: '',
+    status: 'unpaid' as Invoice['status'],
+    items: [{ description: '', quantity: 1, unit_price: 0, total: 0 }] as InvoiceItem[],
+  });
+
   const [showNewPatient, setShowNewPatient] = useState(false);
   const [savingPatient, setSavingPatient] = useState(false);
-  const [newPatientForm, setNewPatientForm] = useState({ name: '', contact: '', gender: 'male', age: '' });
+  const [newPatientForm, setNewPatientForm] = useState({
+    name: '',
+    contact: '',
+    gender: 'male' as 'male' | 'female' | 'other',
+    age: '',
+    doctor_id: profile?.role === 'doctor' ? profile.id : '',
+    clinic_id: profile?.clinic_id || '',
+  });
+
+  const pricingClinicId = profile?.role === 'admin'
+    ? (form.clinic_id || null)
+    : (profile?.clinic_id || form.clinic_id || null);
+
+  const { serviceNames, services, findByName } = useServices(pricingClinicId);
 
   const [linkedPrescription, setLinkedPrescription] = useState<Prescription | null>(null);
   const [showCombinedPrint, setShowCombinedPrint] = useState(false);
@@ -58,16 +80,41 @@ export default function BillingPage() {
   const [createdInvoice, setCreatedInvoice] = useState<Invoice | null>(null);
   const [showPrintOptions, setShowPrintOptions] = useState(false);
 
+  const handleQuickAddDoctorChange = (doctorId: string) => {
+    setNewPatientForm(prev => {
+      const selectedDoctor = doctors.find(d => d.id === doctorId);
+      return {
+        ...prev,
+        doctor_id: doctorId,
+        clinic_id: selectedDoctor?.clinic_id || prev.clinic_id,
+      };
+    });
+  };
+
+  const handleDoctorChange = (doctorId: string) => {
+    setForm(prev => {
+      const selectedDoctor = doctors.find(d => d.id === doctorId);
+      return {
+        ...prev,
+        doctor_id: doctorId,
+        clinic_id: selectedDoctor?.clinic_id || prev.clinic_id,
+      };
+    });
+  };
+
   const handleAddPatient = async () => {
     if (!newPatientForm.name.trim()) { toast.error('Patient name is required.'); return; }
 
-    const assignedClinicId = profile?.role === 'admin'
-      ? (form.clinic_id || null)
-      : (profile?.clinic_id || form.clinic_id || null);
+    const assignedDoctorId = newPatientForm.doctor_id
+      || (profile?.role === 'doctor' ? profile.id : (form.doctor_id || null));
 
-    const assignedDoctorId = profile?.role === 'doctor'
-      ? profile.id
-      : (form.doctor_id || null);
+    const selectedDoctorClinicId = doctors.find(d => d.id === assignedDoctorId)?.clinic_id || null;
+
+    const assignedClinicId = newPatientForm.clinic_id
+      || selectedDoctorClinicId
+      || (profile?.role === 'admin'
+        ? (form.clinic_id || null)
+        : (profile?.clinic_id || form.clinic_id || null));
 
     setSavingPatient(true);
     const { data, error } = await supabase.from('patients').insert({
@@ -78,26 +125,28 @@ export default function BillingPage() {
       email: '', address: '', medical_history: '', dental_history: '', notes: '',
       clinic_id: assignedClinicId,
       doctor_id: assignedDoctorId,
-    }).select('id, name').maybeSingle();
+    }).select('id, name, clinic_id, doctor_id').maybeSingle();
     setSavingPatient(false);
     if (error || !data) { toast.error('Failed to add patient.'); return; }
-    const newP = data as { id: string; name: string };
+    const newP = data as Pick<Patient, 'id' | 'name' | 'clinic_id' | 'doctor_id'>;
     setPatients(prev => [newP as Patient, ...prev]);
-    setForm(f => ({ ...f, patient_id: newP.id }));
-    setNewPatientForm({ name: '', contact: '', gender: 'male', age: '' });
+    setForm(f => ({
+      ...f,
+      patient_id: newP.id,
+      clinic_id: assignedClinicId || f.clinic_id,
+      doctor_id: (assignedDoctorId || f.doctor_id || ''),
+    }));
+    setNewPatientForm({
+      name: '',
+      contact: '',
+      gender: 'male',
+      age: '',
+      doctor_id: profile?.role === 'doctor' ? profile.id : '',
+      clinic_id: profile?.clinic_id || '',
+    });
     setShowNewPatient(false);
     toast.success(`Patient "${newP.name}" added and selected.`);
   };
-
-  const [form, setForm] = useState({
-    patient_id: '',
-    clinic_id: '',
-    doctor_id: '',
-    doctor_fee: '',
-    amount_paid: '',
-    status: 'unpaid' as Invoice['status'],
-    items: [{ description: '', quantity: 1, unit_price: 0, total: 0 }] as InvoiceItem[],
-  });
 
   const fetchInvoices = useCallback(async () => {
     setLoading(true);
@@ -115,8 +164,12 @@ export default function BillingPage() {
   useEffect(() => { fetchInvoices(); }, [fetchInvoices]);
   useEffect(() => {
     const cid = profile?.role !== 'admin' && profile?.clinic_id ? profile.clinic_id : null;
-    const pQ = cid ? supabase.from('patients').select('id, name').eq('clinic_id', cid).order('name') : supabase.from('patients').select('id, name').order('name');
-    const dQ = cid ? supabase.from('users_profile').select('id, name').eq('role', 'doctor').eq('clinic_id', cid).order('name') : supabase.from('users_profile').select('id, name').eq('role', 'doctor').order('name');
+    const pQ = cid
+      ? supabase.from('patients').select('id, name, clinic_id, doctor_id').eq('clinic_id', cid).order('name')
+      : supabase.from('patients').select('id, name, clinic_id, doctor_id').order('name');
+    const dQ = cid
+      ? supabase.from('users_profile').select('id, name, clinic_id').eq('role', 'doctor').eq('clinic_id', cid).order('name')
+      : supabase.from('users_profile').select('id, name, clinic_id').eq('role', 'doctor').order('name');
     pQ.then(({ data }) => setPatients(data || []));
     supabase.from('clinics').select('*').then(({ data }) => setClinics(data || []));
     dQ.then(({ data }) => setDoctors(data || []));
@@ -148,9 +201,9 @@ export default function BillingPage() {
       }
       if (field === 'description') {
         const svc = findByName(String(value));
-        if (svc && items[i].unit_price === 0) {
-          items[i].unit_price = svc.default_price;
-          items[i].total = svc.default_price * items[i].quantity;
+        if (svc) {
+          items[i].unit_price = svc.effective_price;
+          items[i].total = svc.effective_price * items[i].quantity;
         }
       }
       return { ...f, items };
@@ -373,7 +426,14 @@ export default function BillingPage() {
                 <label className="text-sm font-medium text-gray-700">Patient *</label>
                 <button
                   type="button"
-                  onClick={() => setShowNewPatient(v => !v)}
+                  onClick={() => {
+                    setShowNewPatient(v => !v);
+                    setNewPatientForm(f => ({
+                      ...f,
+                      doctor_id: f.doctor_id || form.doctor_id || (profile?.role === 'doctor' ? profile.id : ''),
+                      clinic_id: f.clinic_id || form.clinic_id || profile?.clinic_id || '',
+                    }));
+                  }}
                   className={`flex items-center gap-1.5 text-xs font-medium px-2.5 py-1 rounded-lg transition-colors ${showNewPatient ? 'bg-sky-100 text-sky-700' : 'text-sky-600 hover:bg-sky-50'}`}
                 >
                   <UserPlus className="w-3.5 h-3.5" />
@@ -381,7 +441,21 @@ export default function BillingPage() {
                   <ChevronDown className={`w-3 h-3 transition-transform ${showNewPatient ? 'rotate-180' : ''}`} />
                 </button>
               </div>
-              <select required value={form.patient_id} onChange={e => setForm({...form, patient_id: e.target.value})} className="w-full px-3.5 py-2.5 border border-gray-200 rounded-xl focus:outline-none focus:ring-2 focus:ring-sky-300 text-sm">
+              <select
+                required
+                value={form.patient_id}
+                onChange={e => {
+                  const patientId = e.target.value;
+                  const selectedPatient = patients.find(p => p.id === patientId);
+                  setForm(prev => ({
+                    ...prev,
+                    patient_id: patientId,
+                    clinic_id: selectedPatient?.clinic_id || prev.clinic_id,
+                    doctor_id: selectedPatient?.doctor_id || prev.doctor_id,
+                  }));
+                }}
+                className="w-full px-3.5 py-2.5 border border-gray-200 rounded-xl focus:outline-none focus:ring-2 focus:ring-sky-300 text-sm"
+              >
                 <option value="">Select Patient</option>
                 {patients.map(p => <option key={p.id} value={p.id}>{p.name}</option>)}
               </select>
@@ -389,7 +463,7 @@ export default function BillingPage() {
             {(profile?.role === 'admin' || profile?.role === 'clinic_admin') ? (
               <div>
                 <label className="block text-sm font-medium text-gray-700 mb-1.5">Doctor</label>
-                <select value={form.doctor_id} onChange={e => setForm({...form, doctor_id: e.target.value})} className="w-full px-3.5 py-2.5 border border-gray-200 rounded-xl focus:outline-none focus:ring-2 focus:ring-sky-300 text-sm">
+                <select value={form.doctor_id} onChange={e => handleDoctorChange(e.target.value)} className="w-full px-3.5 py-2.5 border border-gray-200 rounded-xl focus:outline-none focus:ring-2 focus:ring-sky-300 text-sm">
                   <option value="">Select Doctor</option>
                   {doctors.map(d => <option key={d.id} value={d.id}>{d.name}</option>)}
                 </select>
@@ -446,10 +520,31 @@ export default function BillingPage() {
                       <input type="number" placeholder="Age" min="0" max="120" value={newPatientForm.age} onChange={e => setNewPatientForm(f => ({ ...f, age: e.target.value }))} className="w-full px-3 py-2 border border-sky-200 rounded-xl text-sm focus:outline-none focus:ring-2 focus:ring-sky-300 bg-white" />
                     </div>
                     <div>
-                      <select value={newPatientForm.gender} onChange={e => setNewPatientForm(f => ({ ...f, gender: e.target.value }))} className="w-full px-3 py-2 border border-sky-200 rounded-xl text-sm focus:outline-none focus:ring-2 focus:ring-sky-300 bg-white">
+                      <select value={newPatientForm.gender} onChange={e => setNewPatientForm(f => ({ ...f, gender: e.target.value as 'male' | 'female' | 'other' }))} className="w-full px-3 py-2 border border-sky-200 rounded-xl text-sm focus:outline-none focus:ring-2 focus:ring-sky-300 bg-white">
                         <option value="male">Male</option>
                         <option value="female">Female</option>
                         <option value="other">Other</option>
+                      </select>
+                    </div>
+                    <div>
+                      <select
+                        value={newPatientForm.doctor_id}
+                        onChange={e => handleQuickAddDoctorChange(e.target.value)}
+                        disabled={profile?.role === 'doctor'}
+                        className="w-full px-3 py-2 border border-sky-200 rounded-xl text-sm focus:outline-none focus:ring-2 focus:ring-sky-300 bg-white disabled:bg-sky-100/60"
+                      >
+                        <option value="">Assign Doctor (Optional)</option>
+                        {doctors.map(d => <option key={d.id} value={d.id}>{d.name}</option>)}
+                      </select>
+                    </div>
+                    <div>
+                      <select
+                        value={newPatientForm.clinic_id}
+                        onChange={e => setNewPatientForm(f => ({ ...f, clinic_id: e.target.value }))}
+                        className="w-full px-3 py-2 border border-sky-200 rounded-xl text-sm focus:outline-none focus:ring-2 focus:ring-sky-300 bg-white"
+                      >
+                        <option value="">Assign Clinic (Optional)</option>
+                        {clinics.map(c => <option key={c.id} value={c.id}>{c.clinic_name}</option>)}
                       </select>
                     </div>
                     <div className="col-span-1 flex items-end">

@@ -40,6 +40,8 @@ export default function AppointmentsPage() {
     contact: '',
     gender: 'male' as 'male' | 'female' | 'other',
     age: '',
+    doctor_id: profile?.role === 'doctor' ? profile.id : '',
+    clinic_id: profile?.clinic_id || '',
   });
 
   const [form, setForm] = useState({
@@ -80,7 +82,14 @@ export default function AppointmentsPage() {
   const openAdd = () => {
     setEditAppt(null);
     setShowNewPatient(false);
-    setNewPatientForm({ name: '', contact: '', gender: 'male', age: '' });
+    setNewPatientForm({
+      name: '',
+      contact: '',
+      gender: 'male',
+      age: '',
+      doctor_id: profile?.role === 'doctor' ? profile.id : '',
+      clinic_id: profile?.clinic_id || '',
+    });
     setForm({ patient_id: '', doctor_id: profile?.role === 'doctor' ? profile.id : '', clinic_id: profile?.clinic_id || '', appointment_date: format(new Date(), 'yyyy-MM-dd'), appointment_time: '09:00', status: 'scheduled', notes: '' });
     setShowForm(true);
   };
@@ -88,9 +97,27 @@ export default function AppointmentsPage() {
   const openEdit = (appt: Appointment) => {
     setEditAppt(appt);
     setShowNewPatient(false);
-    setNewPatientForm({ name: '', contact: '', gender: 'male', age: '' });
+    setNewPatientForm({
+      name: '',
+      contact: '',
+      gender: 'male',
+      age: '',
+      doctor_id: appt.doctor_id || (profile?.role === 'doctor' ? profile.id : ''),
+      clinic_id: appt.clinic_id || profile?.clinic_id || '',
+    });
     setForm({ patient_id: appt.patient_id, doctor_id: appt.doctor_id || '', clinic_id: appt.clinic_id || '', appointment_date: appt.appointment_date, appointment_time: appt.appointment_time?.slice(0, 5) || '09:00', status: appt.status, notes: appt.notes || '' });
     setShowForm(true);
+  };
+
+  const handleQuickAddDoctorChange = (doctorId: string) => {
+    setNewPatientForm(prev => {
+      const selectedDoctor = doctors.find(d => d.id === doctorId);
+      return {
+        ...prev,
+        doctor_id: doctorId,
+        clinic_id: selectedDoctor?.clinic_id || prev.clinic_id,
+      };
+    });
   };
 
   const handleAddPatient = async () => {
@@ -101,13 +128,16 @@ export default function AppointmentsPage() {
 
     setSavingPatient(true);
 
-    const assignedClinicId = profile?.role === 'admin'
-      ? (form.clinic_id || null)
-      : (profile?.clinic_id || form.clinic_id || null);
+    const assignedDoctorId = newPatientForm.doctor_id
+      || (profile?.role === 'doctor' ? profile.id : (form.doctor_id || null));
 
-    const assignedDoctorId = profile?.role === 'doctor'
-      ? profile.id
-      : (form.doctor_id || null);
+    const selectedDoctorClinicId = doctors.find(d => d.id === assignedDoctorId)?.clinic_id || null;
+
+    const assignedClinicId = newPatientForm.clinic_id
+      || selectedDoctorClinicId
+      || (profile?.role === 'admin'
+        ? (form.clinic_id || null)
+        : (profile?.clinic_id || form.clinic_id || null));
 
     const { data, error } = await supabase
       .from('patients')
@@ -139,10 +169,17 @@ export default function AppointmentsPage() {
     setForm(f => ({
       ...f,
       patient_id: created.id,
-      clinic_id: f.clinic_id || (created.clinic_id || ''),
-      doctor_id: f.doctor_id || (created.doctor_id || ''),
+      clinic_id: created.clinic_id || f.clinic_id,
+      doctor_id: created.doctor_id || f.doctor_id,
     }));
-    setNewPatientForm({ name: '', contact: '', gender: 'male', age: '' });
+    setNewPatientForm({
+      name: '',
+      contact: '',
+      gender: 'male',
+      age: '',
+      doctor_id: profile?.role === 'doctor' ? profile.id : '',
+      clinic_id: profile?.clinic_id || '',
+    });
     setShowNewPatient(false);
     toast.success(`Patient "${created.name}" added and selected.`);
   };
@@ -351,6 +388,27 @@ export default function AppointmentsPage() {
                       <option value="male">Male</option>
                       <option value="female">Female</option>
                       <option value="other">Other</option>
+                    </select>
+                  </div>
+                  <div>
+                    <select
+                      value={newPatientForm.doctor_id}
+                      onChange={e => handleQuickAddDoctorChange(e.target.value)}
+                      disabled={profile?.role === 'doctor'}
+                      className="w-full px-3 py-2 border border-sky-200 rounded-xl text-sm focus:outline-none focus:ring-2 focus:ring-sky-300 bg-white disabled:bg-sky-100/60"
+                    >
+                      <option value="">Assign Doctor (Optional)</option>
+                      {doctors.map(d => <option key={d.id} value={d.id}>{d.name}</option>)}
+                    </select>
+                  </div>
+                  <div>
+                    <select
+                      value={newPatientForm.clinic_id}
+                      onChange={e => setNewPatientForm(f => ({ ...f, clinic_id: e.target.value }))}
+                      className="w-full px-3 py-2 border border-sky-200 rounded-xl text-sm focus:outline-none focus:ring-2 focus:ring-sky-300 bg-white"
+                    >
+                      <option value="">Assign Clinic (Optional)</option>
+                      {clinics.map(c => <option key={c.id} value={c.id}>{c.clinic_name}</option>)}
                     </select>
                   </div>
                   <div className="flex items-end">
