@@ -60,9 +60,23 @@ interface LegacyPermissionRow {
   can_delete: boolean | null;
 }
 
+interface RoleEdgeResponse {
+  role?: {
+    id: string;
+    name?: string;
+    role_name?: string;
+    is_system_default?: boolean | null;
+    is_default?: boolean | null;
+    clinic_id?: string | null;
+  };
+  schema_mode?: RoleSchemaMode;
+}
+
 type StaffTab = 'team' | 'permissions';
 type RoleSchemaMode = 'roles' | 'clinic_roles';
 type PermissionSchemaMode = 'modern' | 'legacy';
+
+const ROLE_SCHEMA_PREFERENCE_KEY = 'clinic_management:role_schema_mode';
 
 const ROLE_PRIORITY = ['admin', 'manager', 'doctor', 'assistant', 'receptionist', 'barber', 'clinic_admin'];
 
@@ -105,6 +119,22 @@ const isMissingTableError = (errorLike: SupabaseLikeError | string | null | unde
 const isMissingColumnError = (message: string, column: string) => {
   const msg = message.toLowerCase();
   return msg.includes(column.toLowerCase()) && (msg.includes('column') || msg.includes('does not exist'));
+};
+
+const getStoredRoleSchemaMode = (): RoleSchemaMode => {
+  if (typeof window === 'undefined') return 'clinic_roles';
+
+  const raw = window.localStorage.getItem(ROLE_SCHEMA_PREFERENCE_KEY);
+  if (raw === 'roles' || raw === 'clinic_roles') {
+    return raw;
+  }
+
+  return 'clinic_roles';
+};
+
+const storeRoleSchemaMode = (mode: RoleSchemaMode) => {
+  if (typeof window === 'undefined') return;
+  window.localStorage.setItem(ROLE_SCHEMA_PREFERENCE_KEY, mode);
 };
 
 const normalizeRoleLabel = (role: string) => role.replace(/_/g, ' ').replace(/\b\w/g, (c) => c.toUpperCase());
@@ -170,7 +200,7 @@ export default function StaffRolesPage() {
 
   const [roles, setRoles] = useState<Role[]>([]);
   const [selectedRole, setSelectedRole] = useState<Role | null>(null);
-  const [roleSchemaMode, setRoleSchemaMode] = useState<RoleSchemaMode>('roles');
+  const [roleSchemaMode, setRoleSchemaMode] = useState<RoleSchemaMode>(() => getStoredRoleSchemaMode());
   const [loadingRoles, setLoadingRoles] = useState(false);
 
   const [permissions, setPermissions] = useState<Record<string, Permission>>({});
@@ -202,6 +232,28 @@ export default function StaffRolesPage() {
   const enabledPermissionCount = useMemo(() => {
     return PERMISSION_DEFINITIONS.filter((perm) => permissions[perm.key]?.can_read).length;
   }, [permissions]);
+
+  const setRoleSchemaModeWithPreference = useCallback((mode: RoleSchemaMode) => {
+    setRoleSchemaMode(mode);
+    storeRoleSchemaMode(mode);
+  }, []);
+
+  const isPermissionDeniedError = (error: unknown) => {
+    if (!error || typeof error !== 'object') return false;
+
+    const errLike = error as SupabaseLikeError;
+    const status = errLike.status ?? errLike.statusCode;
+    const code = (errLike.code || '').toUpperCase();
+    const message = getErrorMessage(error).toLowerCase();
+
+    return (
+      status === 401 ||
+      status === 403 ||
+      code === '42501' ||
+      message.includes('permission denied') ||
+      message.includes('forbidden')
+    );
+  };
 
   const fetchClinics = useCallback(async () => {
     if (!profile) return;
@@ -294,10 +346,10 @@ export default function StaffRolesPage() {
           const modernResult = await fetchModernRoles();
           if (modernResult.error) throw modernResult.error;
 
-          setRoleSchemaMode('roles');
+          setRoleSchemaModeWithPreference('roles');
           normalizedRoles = (modernResult.data || []) as Role[];
         } else {
-          setRoleSchemaMode('clinic_roles');
+          setRoleSchemaModeWithPreference('clinic_roles');
           normalizedRoles = ((legacyResult.data || []) as LegacyRoleRow[]).map((row) => ({
             id: row.id,
             name: row.role_name,
@@ -316,7 +368,7 @@ export default function StaffRolesPage() {
           const legacyResult = await fetchLegacyRoles();
           if (legacyResult.error) throw legacyResult.error;
 
-          setRoleSchemaMode('clinic_roles');
+          setRoleSchemaModeWithPreference('clinic_roles');
           normalizedRoles = ((legacyResult.data || []) as LegacyRoleRow[]).map((row) => ({
             id: row.id,
             name: row.role_name,
@@ -324,7 +376,7 @@ export default function StaffRolesPage() {
             clinic_id: row.clinic_id,
           }));
         } else {
-          setRoleSchemaMode('roles');
+          setRoleSchemaModeWithPreference('roles');
           normalizedRoles = (modernResult.data || []) as Role[];
         }
       }
@@ -347,7 +399,7 @@ export default function StaffRolesPage() {
     } finally {
       setLoadingRoles(false);
     }
-  }, [profile, requiresClinicSelection, effectiveClinicId, roleSchemaMode]);
+  }, [profile, requiresClinicSelection, effectiveClinicId, roleSchemaMode, setRoleSchemaModeWithPreference]);
 
   const fetchTeam = useCallback(async () => {
     if (!profile) return;
@@ -578,30 +630,31 @@ export default function StaffRolesPage() {
     }
 
     try {
-      let createdRole: Role;
+      const createRoleDirect = async (): Promise<Role> => {
+        if (roleSchemaMode === 'clinic_roles') {
+          const { data, error } = await supabase
+            .from('clinic_roles')
+            .insert([
+              {
+                role_name: roleName,
+                clinic_id: effectiveClinicId,
+                is_default: false,
+              },
+            ])
+            .select('id, role_name, is_default, clinic_id')
+            .single();
 
-      if (roleSchemaMode === 'clinic_roles') {
-        const { data, error } = await supabase
-          .from('clinic_roles')
-          .insert([
-            {
-              role_name: roleName,
-              clinic_id: effectiveClinicId,
-              is_default: false,
-            },
-          ])
-          .select('id, role_name, is_default, clinic_id')
-          .single();
+          if (error) throw error;
 
-        if (error) throw error;
+          setRoleSchemaModeWithPreference('clinic_roles');
+          return {
+            id: data.id,
+            name: data.role_name,
+            is_system_default: Boolean(data.is_default),
+            clinic_id: data.clinic_id,
+          };
+        }
 
-        createdRole = {
-          id: data.id,
-          name: data.role_name,
-          is_system_default: Boolean(data.is_default),
-          clinic_id: data.clinic_id,
-        };
-      } else {
         const { data, error } = await supabase
           .from('roles')
           .insert([
@@ -615,7 +668,54 @@ export default function StaffRolesPage() {
           .single();
 
         if (error) throw error;
-        createdRole = data as Role;
+
+        setRoleSchemaModeWithPreference('roles');
+        return data as Role;
+      };
+
+      const createRoleViaEdgeFunction = async (): Promise<Role> => {
+        const { data, error } = await supabase.functions.invoke('create-user', {
+          body: {
+            action: 'create_role',
+            role_name: roleName,
+            clinic_id: effectiveClinicId,
+            schema_mode: roleSchemaMode,
+          },
+        });
+
+        if (error) {
+          throw new Error(error.message || 'Role creation request failed');
+        }
+
+        const payload = (data || {}) as RoleEdgeResponse;
+        const created = payload.role;
+
+        if (!created?.id) {
+          throw new Error('Role creation did not return role data');
+        }
+
+        if (payload.schema_mode === 'roles' || payload.schema_mode === 'clinic_roles') {
+          setRoleSchemaModeWithPreference(payload.schema_mode);
+        }
+
+        return {
+          id: created.id,
+          name: created.name || created.role_name || roleName,
+          is_system_default: Boolean(created.is_system_default ?? created.is_default),
+          clinic_id: created.clinic_id ?? effectiveClinicId ?? null,
+        };
+      };
+
+      let createdRole: Role;
+
+      try {
+        createdRole = await createRoleDirect();
+      } catch (directError: unknown) {
+        if (!isPermissionDeniedError(directError)) {
+          throw directError;
+        }
+
+        createdRole = await createRoleViaEdgeFunction();
       }
 
       const nextRoles = sortRoles([...roles, createdRole]);
@@ -625,273 +725,272 @@ export default function StaffRolesPage() {
       setIsAddingRole(false);
       toast.success('Role created successfully');
     } catch (err: unknown) {
-      toast.error('Failed to create role: ' + getErrorMessage(err));
+      const message = getErrorMessage(err);
+
+      if (message.includes('Name, email, and password are required')) {
+        toast.error('Please deploy the latest create-user edge function, then try adding the role again.');
+        return;
+      }
+
+      toast.error('Failed to create role: ' + message);
     }
   };
 
   return (
-    <div className="mx-auto max-w-7xl p-4 md:p-6">
-      <div className="min-h-[calc(100vh-8.5rem)] rounded-3xl border border-[#1a2438] bg-[#050913] text-slate-100 shadow-[0_24px_70px_rgba(2,6,23,0.5)]">
-        <div className="space-y-6 p-5 md:p-8">
-          <div className="flex flex-wrap items-start justify-between gap-4">
-            <div>
-              <h1 className="text-3xl font-semibold tracking-tight text-white">Staff & Roles</h1>
-              <p className="mt-1 text-sm text-slate-400">
-                {teamLoading ? 'Loading team members...' : `${team.length} team members`}
-              </p>
-            </div>
+    <div className="p-6 space-y-6">
+      <div className="flex flex-wrap items-start justify-between gap-4">
+        <div>
+          <h1 className="text-3xl font-bold text-gray-900">Staff & Roles</h1>
+          <p className="mt-1 text-gray-600">{teamLoading ? 'Loading team members...' : `${team.length} team members`}</p>
+        </div>
 
-            <div className="flex flex-wrap items-center gap-3">
-              <div className="inline-flex rounded-xl border border-[#25304a] bg-[#0c1322] p-1 text-sm font-medium">
-                <button
-                  onClick={() => setActiveTab('team')}
-                  className={`rounded-lg px-5 py-2.5 transition-colors ${
-                    activeTab === 'team' ? 'bg-[#2563eb] text-white' : 'text-slate-400 hover:text-white'
-                  }`}
-                >
-                  Team
-                </button>
-                <button
-                  onClick={() => setActiveTab('permissions')}
-                  className={`rounded-lg px-5 py-2.5 transition-colors ${
-                    activeTab === 'permissions' ? 'bg-[#2563eb] text-white' : 'text-slate-400 hover:text-white'
-                  }`}
-                >
-                  Roles & Permissions
-                </button>
-              </div>
-
-              <button
-                onClick={() => navigate('/portal/users')}
-                className="inline-flex items-center gap-2 rounded-xl bg-[#2563eb] px-5 py-2.5 text-sm font-semibold text-white transition-colors hover:bg-[#1d4ed8]"
-              >
-                <Plus size={16} />
-                Add Staff
-              </button>
-            </div>
+        <div className="flex flex-wrap items-center gap-3">
+          <div className="bg-gray-100 p-1 rounded-xl flex text-sm font-medium">
+            <button
+              onClick={() => setActiveTab('team')}
+              className={`px-5 py-2.5 rounded-lg transition-colors ${
+                activeTab === 'team' ? 'bg-white text-sky-700 shadow-sm' : 'text-gray-500 hover:text-gray-900'
+              }`}
+            >
+              Team
+            </button>
+            <button
+              onClick={() => setActiveTab('permissions')}
+              className={`px-5 py-2.5 rounded-lg transition-colors ${
+                activeTab === 'permissions' ? 'bg-white text-sky-700 shadow-sm' : 'text-gray-500 hover:text-gray-900'
+              }`}
+            >
+              Roles & Permissions
+            </button>
           </div>
 
-          <div className="rounded-2xl border border-[#1f2a41] bg-[#0a1120] p-4">
-            <div className="flex flex-wrap items-end gap-4">
-              <div className="min-w-[240px] flex-1 max-w-sm">
-                <label className="mb-1.5 block text-xs font-semibold uppercase tracking-[0.16em] text-slate-400">
-                  Select Clinic First
-                </label>
-                <select
-                  value={selectedClinicId}
-                  onChange={(e) => setSelectedClinicId(e.target.value)}
-                  disabled={loadingClinics || !isAdmin || !hasMultipleClinics}
-                  className="w-full rounded-xl border border-[#2a3755] bg-[#10192d] px-3 py-2.5 text-sm text-slate-100 outline-none transition focus:border-[#3b82f6] focus:ring-2 focus:ring-[#3b82f6]/30 disabled:cursor-not-allowed disabled:opacity-60"
-                >
-                  {isAdmin && hasMultipleClinics && <option value="">Choose a clinic</option>}
-                  {clinics.map((clinic) => (
-                    <option key={clinic.id} value={clinic.id}>
-                      {clinic.clinic_name}
-                    </option>
-                  ))}
-                </select>
-              </div>
+          <button
+            onClick={() => navigate('/portal/users')}
+            className="inline-flex items-center gap-2 px-5 py-2.5 bg-sky-600 text-white rounded-xl hover:bg-sky-700 transition-colors"
+          >
+            <Plus size={16} />
+            Add Staff
+          </button>
+        </div>
+      </div>
 
-              <p className="pb-1 text-sm text-slate-300">
-                Managing: <span className="font-semibold text-white">{selectedClinicName}</span>
-              </p>
-            </div>
+      <div className="bg-white rounded-2xl shadow-sm border border-gray-100 p-4">
+        <div className="flex flex-wrap items-end gap-4">
+          <div className="min-w-[240px] flex-1 max-w-sm">
+            <label className="mb-1.5 block text-xs font-semibold uppercase tracking-[0.14em] text-gray-500">
+              Select Clinic First
+            </label>
+            <select
+              value={selectedClinicId}
+              onChange={(e) => setSelectedClinicId(e.target.value)}
+              disabled={loadingClinics || !isAdmin || !hasMultipleClinics}
+              className="w-full px-3 py-2.5 text-sm border border-gray-200 rounded-xl focus:ring-2 focus:ring-sky-500 focus:border-sky-500 disabled:cursor-not-allowed disabled:bg-gray-50"
+            >
+              {isAdmin && hasMultipleClinics && <option value="">Choose a clinic</option>}
+              {clinics.map((clinic) => (
+                <option key={clinic.id} value={clinic.id}>
+                  {clinic.clinic_name}
+                </option>
+              ))}
+            </select>
           </div>
 
-          {loadingClinics ? (
-            <div className="rounded-2xl border border-[#1f2a41] bg-[#0a1120] p-10 text-center text-slate-400">Loading clinics...</div>
-          ) : requiresClinicSelection ? (
-            <div className="rounded-2xl border border-[#1f2a41] bg-[#0a1120] p-10 text-center">
-              <h2 className="text-xl font-semibold text-white">Select a clinic to continue</h2>
-              <p className="mt-2 text-sm text-slate-400">
-                Choose a clinic from the dropdown above, then manage staff and role permissions.
-              </p>
-            </div>
-          ) : activeTab === 'team' ? (
-            <div className="overflow-hidden rounded-2xl border border-[#1f2a41] bg-[#0a1120]">
-              <div className="flex items-center justify-between border-b border-[#1f2a41] px-5 py-4">
-                <h2 className="flex items-center gap-2 text-base font-semibold text-white">
-                  <Users size={18} />
-                  Team - {selectedClinicName}
-                </h2>
-                <span className="text-sm text-slate-400">{team.length} members</span>
-              </div>
+          <p className="pb-1 text-sm text-gray-600">
+            Managing: <span className="font-semibold text-gray-900">{selectedClinicName}</span>
+          </p>
+        </div>
+      </div>
 
-              {teamLoading ? (
-                <p className="py-10 text-center text-sm text-slate-400">Loading team...</p>
-              ) : team.length === 0 ? (
-                <p className="py-10 text-center text-sm text-slate-400">No team members found for this clinic.</p>
-              ) : (
-                <div className="overflow-x-auto">
-                  <table className="min-w-full text-sm">
-                    <thead>
-                      <tr className="text-left text-slate-400">
-                        <th className="px-5 py-3 font-medium">Name</th>
-                        <th className="px-5 py-3 font-medium">Email</th>
-                        <th className="px-5 py-3 font-medium">Role</th>
-                        <th className="px-5 py-3 font-medium">Status</th>
-                      </tr>
-                    </thead>
-                    <tbody>
-                      {team.map((member) => (
-                        <tr key={member.id} className="border-t border-[#1f2a41]">
-                          <td className="px-5 py-3 font-medium text-white">{member.name}</td>
-                          <td className="px-5 py-3 text-slate-300">{member.email}</td>
-                          <td className="px-5 py-3 text-slate-200">{normalizeRoleLabel(member.role)}</td>
-                          <td className="px-5 py-3">
-                            <span
-                              className={`inline-flex rounded-full px-2.5 py-1 text-xs font-medium ${
-                                member.is_active
-                                  ? 'bg-emerald-500/20 text-emerald-300'
-                                  : 'bg-slate-500/20 text-slate-300'
-                              }`}
-                            >
-                              {member.is_active ? 'Active' : 'Inactive'}
-                            </span>
-                          </td>
-                        </tr>
-                      ))}
-                    </tbody>
-                  </table>
-                </div>
-              )}
-            </div>
+      {loadingClinics ? (
+        <div className="bg-white rounded-2xl shadow-sm border border-gray-100 p-10 text-center text-gray-500">Loading clinics...</div>
+      ) : requiresClinicSelection ? (
+        <div className="bg-white rounded-2xl shadow-sm border border-gray-100 p-10 text-center">
+          <h2 className="text-xl font-semibold text-gray-900">Select a clinic to continue</h2>
+          <p className="mt-2 text-sm text-gray-500">
+            Choose a clinic from the dropdown above, then manage staff and role permissions.
+          </p>
+        </div>
+      ) : activeTab === 'team' ? (
+        <div className="bg-white rounded-2xl shadow-sm border border-gray-100 overflow-hidden">
+          <div className="flex items-center justify-between border-b border-gray-100 px-5 py-4 bg-gray-50">
+            <h2 className="flex items-center gap-2 text-base font-semibold text-gray-800">
+              <Users size={18} />
+              Team - {selectedClinicName}
+            </h2>
+            <span className="text-sm text-gray-500">{team.length} members</span>
+          </div>
+
+          {teamLoading ? (
+            <p className="py-10 text-center text-sm text-gray-500">Loading team...</p>
+          ) : team.length === 0 ? (
+            <p className="py-10 text-center text-sm text-gray-500">No team members found for this clinic.</p>
           ) : (
-            <div className="grid gap-5 xl:grid-cols-[290px_minmax(0,1fr)]">
-              <aside className="overflow-hidden rounded-2xl border border-[#1f2a41] bg-[#0a1120]">
-                <div className="flex items-center justify-between border-b border-[#1f2a41] px-4 py-4">
-                  <h2 className="text-lg font-semibold text-white">Roles</h2>
-                  <button
-                    onClick={() => setIsAddingRole((prev) => !prev)}
-                    className="inline-flex items-center gap-1 rounded-lg border border-[#2a3a5e] bg-[#10192d] px-2.5 py-1.5 text-xs font-medium text-slate-200 transition hover:border-[#3b82f6]"
-                  >
-                    <Plus size={14} />
-                    Role
-                  </button>
-                </div>
-
-                <div className="max-h-[580px] space-y-2 overflow-y-auto p-3">
-                  {loadingRoles ? (
-                    <p className="px-2 py-3 text-sm text-slate-400">Loading roles...</p>
-                  ) : roles.length === 0 ? (
-                    <p className="px-2 py-3 text-sm text-slate-400">No roles found for this clinic.</p>
-                  ) : (
-                    roles.map((role) => (
-                      <button
-                        key={role.id}
-                        onClick={() => setSelectedRole(role)}
-                        className={`w-full rounded-xl border px-3 py-3 text-left transition ${
-                          selectedRole?.id === role.id
-                            ? 'border-[#2f5fcc] bg-[#13213f] text-blue-100'
-                            : 'border-transparent bg-[#0f182a] text-slate-200 hover:border-[#2a3a5e]'
-                        }`}
-                      >
-                        <div className="flex items-center justify-between gap-2">
-                          <span className="font-medium">{normalizeRoleLabel(role.name)}</span>
-                          {role.is_system_default && (
-                            <span className="inline-flex items-center gap-1 rounded-full bg-slate-700/40 px-2 py-0.5 text-[10px] uppercase tracking-wide text-slate-300">
-                              <Lock size={10} />
-                              System
-                            </span>
-                          )}
-                        </div>
-                      </button>
-                    ))
-                  )}
-                </div>
-
-                {isAddingRole && (
-                  <div className="space-y-2 border-t border-[#1f2a41] p-3">
-                    <input
-                      type="text"
-                      value={newRoleName}
-                      onChange={(e) => setNewRoleName(e.target.value)}
-                      onKeyDown={(e) => e.key === 'Enter' && void handleAddRole()}
-                      placeholder="e.g. manager"
-                      className="w-full rounded-lg border border-[#2a3a5e] bg-[#10192d] px-3 py-2 text-sm text-white outline-none transition focus:border-[#3b82f6]"
-                    />
-                    <div className="flex items-center gap-2">
-                      <button
-                        onClick={() => void handleAddRole()}
-                        className="rounded-lg bg-[#2563eb] px-3 py-1.5 text-xs font-semibold text-white transition hover:bg-[#1d4ed8]"
-                      >
-                        Save Role
-                      </button>
-                      <button
-                        onClick={() => {
-                          setIsAddingRole(false);
-                          setNewRoleName('');
-                        }}
-                        className="rounded-lg border border-[#2a3a5e] px-3 py-1.5 text-xs font-medium text-slate-300 transition hover:text-white"
-                      >
-                        Cancel
-                      </button>
-                    </div>
-                  </div>
-                )}
-              </aside>
-
-              <section className="overflow-hidden rounded-2xl border border-[#1f2a41] bg-[#0a1120]">
-                {loadingRoles ? (
-                  <p className="py-16 text-center text-sm text-slate-400">Loading permissions...</p>
-                ) : !selectedRole ? (
-                  <p className="py-16 text-center text-sm text-slate-400">Select a role to manage permissions.</p>
-                ) : (
-                  <>
-                    <div className="flex flex-wrap items-start justify-between gap-4 border-b border-[#1f2a41] px-5 py-5">
-                      <div>
-                        <h2 className="text-2xl font-semibold text-white">
-                          Permissions for: {normalizeRoleLabel(selectedRole.name)}
-                        </h2>
-                        <p className="mt-1 text-sm text-slate-400">
-                          {enabledPermissionCount} of {PERMISSION_DEFINITIONS.length} permissions enabled
-                        </p>
-                      </div>
-
-                      <button
-                        onClick={() => void savePermissions()}
-                        disabled={savingPermissions}
-                        className="rounded-xl bg-[#2563eb] px-5 py-2.5 text-sm font-semibold text-white transition hover:bg-[#1d4ed8] disabled:cursor-not-allowed disabled:opacity-60"
-                      >
-                        {savingPermissions ? 'Saving...' : 'Save Changes'}
-                      </button>
-                    </div>
-
-                    <div className="divide-y divide-[#1f2a41] px-5">
-                      {PERMISSION_DEFINITIONS.map((perm) => {
-                        const isActive = permissions[perm.key]?.can_read || false;
-                        return (
-                          <div key={perm.key} className="flex items-center justify-between gap-4 py-4">
-                            <div>
-                              <h3 className="text-lg font-semibold text-white">{perm.label}</h3>
-                              <p className="text-sm text-slate-400">{perm.desc}</p>
-                            </div>
-
-                            <button
-                              role="switch"
-                              aria-checked={isActive}
-                              onClick={() => togglePermission(perm.key)}
-                              className={`relative inline-flex h-7 w-12 items-center rounded-full transition-colors focus:outline-none focus:ring-2 focus:ring-[#3b82f6] focus:ring-offset-2 focus:ring-offset-[#0a1120] ${
-                                isActive ? 'bg-[#2563eb]' : 'bg-[#25324f]'
-                              }`}
-                            >
-                              <span
-                                className={`inline-block h-5 w-5 transform rounded-full bg-white transition-transform ${
-                                  isActive ? 'translate-x-6' : 'translate-x-1'
-                                }`}
-                              />
-                            </button>
-                          </div>
-                        );
-                      })}
-                    </div>
-                  </>
-                )}
-              </section>
+            <div className="overflow-x-auto">
+              <table className="min-w-full text-sm">
+                <thead>
+                  <tr className="text-left text-gray-500 border-b border-gray-100">
+                    <th className="px-5 py-3 font-medium">Name</th>
+                    <th className="px-5 py-3 font-medium">Email</th>
+                    <th className="px-5 py-3 font-medium">Role</th>
+                    <th className="px-5 py-3 font-medium">Status</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {team.map((member) => (
+                    <tr key={member.id} className="border-b border-gray-50 last:border-0">
+                      <td className="px-5 py-3 font-medium text-gray-900">{member.name}</td>
+                      <td className="px-5 py-3 text-gray-600">{member.email}</td>
+                      <td className="px-5 py-3 text-gray-700">{normalizeRoleLabel(member.role)}</td>
+                      <td className="px-5 py-3">
+                        <span
+                          className={`inline-flex rounded-full px-2.5 py-1 text-xs font-medium ${
+                            member.is_active ? 'bg-emerald-100 text-emerald-700' : 'bg-gray-100 text-gray-600'
+                          }`}
+                        >
+                          {member.is_active ? 'Active' : 'Inactive'}
+                        </span>
+                      </td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
             </div>
           )}
         </div>
-      </div>
+      ) : (
+        <div className="grid gap-6 xl:grid-cols-[290px_minmax(0,1fr)]">
+          <aside className="bg-white rounded-2xl shadow-sm border border-gray-100 overflow-hidden">
+            <div className="flex items-center justify-between border-b border-gray-100 px-4 py-4 bg-gray-50">
+              <h2 className="text-lg font-semibold text-gray-800">Roles</h2>
+              <button
+                onClick={() => setIsAddingRole((prev) => !prev)}
+                className="inline-flex items-center gap-1 rounded-lg bg-sky-50 text-sky-700 px-2.5 py-1.5 text-xs font-semibold hover:bg-sky-100 transition-colors"
+              >
+                <Plus size={14} />
+                Role
+              </button>
+            </div>
+
+            <div className="max-h-[580px] space-y-2 overflow-y-auto p-3">
+              {loadingRoles ? (
+                <p className="px-2 py-3 text-sm text-gray-500">Loading roles...</p>
+              ) : roles.length === 0 ? (
+                <p className="px-2 py-3 text-sm text-gray-500">No roles found for this clinic.</p>
+              ) : (
+                roles.map((role) => (
+                  <button
+                    key={role.id}
+                    onClick={() => setSelectedRole(role)}
+                    className={`w-full rounded-xl border px-3 py-3 text-left transition ${
+                      selectedRole?.id === role.id
+                        ? 'border-sky-200 bg-sky-50 text-sky-700'
+                        : 'border-transparent bg-white text-gray-700 hover:bg-gray-50'
+                    }`}
+                  >
+                    <div className="flex items-center justify-between gap-2">
+                      <span className="font-medium">{normalizeRoleLabel(role.name)}</span>
+                      {role.is_system_default && (
+                        <span className="inline-flex items-center gap-1 rounded-full bg-gray-100 px-2 py-0.5 text-[10px] uppercase tracking-wide text-gray-500">
+                          <Lock size={10} />
+                          System
+                        </span>
+                      )}
+                    </div>
+                  </button>
+                ))
+              )}
+            </div>
+
+            {isAddingRole && (
+              <div className="space-y-2 border-t border-gray-100 p-3">
+                <input
+                  type="text"
+                  value={newRoleName}
+                  onChange={(e) => setNewRoleName(e.target.value)}
+                  onKeyDown={(e) => e.key === 'Enter' && void handleAddRole()}
+                  placeholder="e.g. manager"
+                  className="w-full rounded-lg border border-gray-200 px-3 py-2 text-sm text-gray-900 focus:ring-2 focus:ring-sky-500 focus:border-sky-500"
+                />
+                <div className="flex items-center gap-2">
+                  <button
+                    onClick={() => void handleAddRole()}
+                    className="rounded-lg bg-sky-600 px-3 py-1.5 text-xs font-semibold text-white transition hover:bg-sky-700"
+                  >
+                    Save Role
+                  </button>
+                  <button
+                    onClick={() => {
+                      setIsAddingRole(false);
+                      setNewRoleName('');
+                    }}
+                    className="rounded-lg border border-gray-200 px-3 py-1.5 text-xs font-medium text-gray-600 transition hover:text-gray-900"
+                  >
+                    Cancel
+                  </button>
+                </div>
+              </div>
+            )}
+          </aside>
+
+          <section className="bg-white rounded-2xl shadow-sm border border-gray-100 overflow-hidden">
+            {loadingRoles ? (
+              <p className="py-16 text-center text-sm text-gray-500">Loading permissions...</p>
+            ) : !selectedRole ? (
+              <p className="py-16 text-center text-sm text-gray-500">Select a role to manage permissions.</p>
+            ) : (
+              <>
+                <div className="flex flex-wrap items-start justify-between gap-4 border-b border-gray-100 px-5 py-5 bg-gray-50">
+                  <div>
+                    <h2 className="text-2xl font-semibold text-gray-900">
+                      Permissions for: {normalizeRoleLabel(selectedRole.name)}
+                    </h2>
+                    <p className="mt-1 text-sm text-gray-500">
+                      {enabledPermissionCount} of {PERMISSION_DEFINITIONS.length} permissions enabled
+                    </p>
+                  </div>
+
+                  <button
+                    onClick={() => void savePermissions()}
+                    disabled={savingPermissions}
+                    className="rounded-xl bg-sky-600 px-5 py-2.5 text-sm font-semibold text-white transition hover:bg-sky-700 disabled:cursor-not-allowed disabled:opacity-60"
+                  >
+                    {savingPermissions ? 'Saving...' : 'Save Changes'}
+                  </button>
+                </div>
+
+                <div className="divide-y divide-gray-100 px-5">
+                  {PERMISSION_DEFINITIONS.map((perm) => {
+                    const isActive = permissions[perm.key]?.can_read || false;
+                    return (
+                      <div key={perm.key} className="flex items-center justify-between gap-4 py-4">
+                        <div>
+                          <h3 className="text-lg font-semibold text-gray-900">{perm.label}</h3>
+                          <p className="text-sm text-gray-500">{perm.desc}</p>
+                        </div>
+
+                        <button
+                          role="switch"
+                          aria-checked={isActive}
+                          onClick={() => togglePermission(perm.key)}
+                          className={`relative inline-flex h-7 w-12 items-center rounded-full transition-colors focus:outline-none focus:ring-2 focus:ring-sky-500 focus:ring-offset-2 focus:ring-offset-white ${
+                            isActive ? 'bg-sky-600' : 'bg-gray-300'
+                          }`}
+                        >
+                          <span
+                            className={`inline-block h-5 w-5 transform rounded-full bg-white transition-transform ${
+                              isActive ? 'translate-x-6' : 'translate-x-1'
+                            }`}
+                          />
+                        </button>
+                      </div>
+                    );
+                  })}
+                </div>
+              </>
+            )}
+          </section>
+        </div>
+      )}
     </div>
   );
 }

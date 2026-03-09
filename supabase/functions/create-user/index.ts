@@ -24,9 +24,31 @@ Deno.serve(async (req: Request) => {
   try {
     const ALLOWED_USER_ROLES = ["admin", "clinic_admin", "doctor", "assistant", "receptionist"];
 
-    const isMissingTableError = (message: string, table: string) => {
-      const msg = message.toLowerCase();
-      return msg.includes(`public.${table}`) || msg.includes(`relation "${table}"`) || msg.includes(`table '${table}'`);
+    const isMissingTableError = (
+      errorLike: { message?: string; code?: string; status?: number } | string | null | undefined,
+      table: string
+    ) => {
+      if (!errorLike) return false;
+
+      const tableName = table.toLowerCase();
+      const buildMessage = (message: string) => {
+        const msg = message.toLowerCase();
+        return (
+          msg.includes(`public.${tableName}`) ||
+          msg.includes(`relation "${tableName}"`) ||
+          msg.includes(`table '${tableName}'`) ||
+          msg.includes(`could not find the table 'public.${tableName}'`) ||
+          (msg.includes('not found') && msg.includes(tableName))
+        );
+      };
+
+      if (typeof errorLike === 'string') {
+        return buildMessage(errorLike);
+      }
+
+      const status = errorLike.status;
+      const code = (errorLike.code || '').toUpperCase();
+      return status === 404 || code === '42P01' || code === 'PGRST205' || buildMessage(errorLike.message || '');
     };
 
     const supabaseAdmin = createClient(
@@ -113,8 +135,10 @@ Deno.serve(async (req: Request) => {
       email?: string;
       password?: string;
       role?: string;
+      role_name?: string;
       clinic_id?: string | null;
       is_active?: boolean;
+      schema_mode?: 'roles' | 'clinic_roles';
     };
 
     try {
@@ -127,6 +151,150 @@ Deno.serve(async (req: Request) => {
     }
 
     const action = body.action || "create";
+
+    if (action === "create_role") {
+      const rawRoleName = (body.role_name || body.role || "").trim().toLowerCase();
+      const normalizedRoleName = rawRoleName.replace(/\s+/g, "_");
+
+      if (!normalizedRoleName) {
+        return new Response(JSON.stringify({ error: "role_name is required." }), {
+          status: 400,
+          headers: { ...corsHeaders, "Content-Type": "application/json" },
+        });
+      }
+
+      if (!/^[a-z0-9_]+$/.test(normalizedRoleName)) {
+        return new Response(JSON.stringify({ error: "Role name can only include lowercase letters, numbers, and underscores." }), {
+          status: 400,
+          headers: { ...corsHeaders, "Content-Type": "application/json" },
+        });
+      }
+
+      let targetClinicId = body.clinic_id || null;
+      if (callerProfile.role === "clinic_admin") {
+        if (!callerProfile.clinic_id) {
+          return new Response(JSON.stringify({ error: "Clinic admin profile is missing clinic_id." }), {
+            status: 403,
+            headers: { ...corsHeaders, "Content-Type": "application/json" },
+          });
+        }
+        targetClinicId = callerProfile.clinic_id;
+      }
+
+      if (!targetClinicId) {
+        return new Response(JSON.stringify({ error: "clinic_id is required for role creation." }), {
+          status: 400,
+          headers: { ...corsHeaders, "Content-Type": "application/json" },
+        });
+      }
+
+      const schemaHint = body.schema_mode === "roles" || body.schema_mode === "clinic_roles"
+        ? body.schema_mode
+        : "clinic_roles";
+
+      const createLegacyRole = async () => {
+        const result = await supabaseAdmin
+          .from("clinic_roles")
+          .insert([{ role_name: normalizedRoleName, clinic_id: targetClinicId, is_default: false }])
+          .select("id, role_name, is_default, clinic_id")
+          .single();
+
+        if (result.error) {
+          if (isMissingTableError({ message: result.error.message, code: result.error.code, status: result.status }, "clinic_roles")) {
+            return { missingTable: true as const, role: null as null };
+          }
+          throw result.error;
+        }
+
+        return {
+          missingTable: false as const,
+          role: {
+            id: result.data.id as string,
+            name: result.data.role_name as string,
+            is_system_default: Boolean(result.data.is_default),
+            clinic_id: (result.data.clinic_id as string | null) || null,
+          },
+        };
+      };
+
+      const createModernRole = async () => {
+        const result = await supabaseAdmin
+          .from("roles")
+          .insert([{ name: normalizedRoleName, clinic_id: targetClinicId, is_system_default: false }])
+          .select("id, name, is_system_default, clinic_id")
+          .single();
+
+        if (result.error) {
+          if (isMissingTableError({ message: result.error.message, code: result.error.code, status: result.status }, "roles")) {
+            return { missingTable: true as const, role: null as null };
+          }
+          throw result.error;
+        }
+
+        return {
+          missingTable: false as const,
+          role: {
+            id: result.data.id as string,
+            name: result.data.name as string,
+            is_system_default: Boolean(result.data.is_system_default),
+            clinic_id: (result.data.clinic_id as string | null) || null,
+          },
+        };
+      };
+
+      try {
+        let createdRole: { id: string; name: string; is_system_default: boolean; clinic_id: string | null } | null = null;
+        let resolvedSchema: "roles" | "clinic_roles" = schemaHint;
+
+        if (schemaHint === "roles") {
+          const modern = await createModernRole();
+          if (!modern.missingTable) {
+            createdRole = modern.role;
+            resolvedSchema = "roles";
+          } else {
+            const legacy = await createLegacyRole();
+            if (legacy.missingTable) {
+              throw new Error("Neither roles nor clinic_roles table exists.");
+            }
+            createdRole = legacy.role;
+            resolvedSchema = "clinic_roles";
+          }
+        } else {
+          const legacy = await createLegacyRole();
+          if (!legacy.missingTable) {
+            createdRole = legacy.role;
+            resolvedSchema = "clinic_roles";
+          } else {
+            const modern = await createModernRole();
+            if (modern.missingTable) {
+              throw new Error("Neither clinic_roles nor roles table exists.");
+            }
+            createdRole = modern.role;
+            resolvedSchema = "roles";
+          }
+        }
+
+        return new Response(JSON.stringify({ success: true, role: createdRole, schema_mode: resolvedSchema }), {
+          status: 200,
+          headers: { ...corsHeaders, "Content-Type": "application/json" },
+        });
+      } catch (createRoleErr) {
+        const errorObj = createRoleErr as { message?: string; code?: string };
+        const code = (errorObj.code || "").toUpperCase();
+
+        if (code === "23505") {
+          return new Response(JSON.stringify({ error: "This role already exists in the selected clinic." }), {
+            status: 409,
+            headers: { ...corsHeaders, "Content-Type": "application/json" },
+          });
+        }
+
+        return new Response(JSON.stringify({ error: errorObj.message || "Failed to create role." }), {
+          status: 400,
+          headers: { ...corsHeaders, "Content-Type": "application/json" },
+        });
+      }
+    }
 
     if (action === "update_password") {
       const { user_id, password } = body;

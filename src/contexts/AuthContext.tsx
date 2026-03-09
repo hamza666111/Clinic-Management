@@ -16,6 +16,7 @@ interface AuthContextType {
 }
 
 const AuthContext = createContext<AuthContextType | undefined>(undefined);
+const ROLE_SCHEMA_PREFERENCE_KEY = 'clinic_management:role_schema_mode';
 
 const isMissingColumnError = (message: string, column: string) => {
   const msg = message.toLowerCase();
@@ -41,7 +42,7 @@ const isMissingTableError = (errorLike: SupabaseLikeError | string | null | unde
       msg.includes(`public.${tableName}`) ||
       msg.includes(`relation "${tableName}"`) ||
       msg.includes(`table '${tableName}'`) ||
-      msg.includes(`table \"public.${tableName}\"`) ||
+      msg.includes(`table "public.${tableName}"`) ||
       msg.includes(`could not find the table 'public.${tableName}'`) ||
       (msg.includes('not found') && msg.includes(tableName))
     );
@@ -58,9 +59,38 @@ const isMissingTableError = (errorLike: SupabaseLikeError | string | null | unde
   return status === 404 || code === '42P01' || code === 'PGRST205' || buildMessage(message);
 };
 
+const getStoredRoleSchemaPreference = (): 'roles' | 'clinic_roles' => {
+  if (typeof window === 'undefined') return 'clinic_roles';
+
+  const value = window.localStorage.getItem(ROLE_SCHEMA_PREFERENCE_KEY);
+  if (value === 'roles' || value === 'clinic_roles') {
+    return value;
+  }
+
+  return 'clinic_roles';
+};
+
+const storeRoleSchemaPreference = (mode: 'roles' | 'clinic_roles') => {
+  if (typeof window === 'undefined') return;
+  window.localStorage.setItem(ROLE_SCHEMA_PREFERENCE_KEY, mode);
+};
+
 type RawUserProfile = Omit<UserProfile, 'dynamic_role_id'> & {
   dynamic_role_id?: string | null;
   clinic_role_id?: string | null;
+};
+
+type ModernPermissionRow = {
+  permission_key: string | null;
+  can_read: boolean | null;
+  can_write: boolean | null;
+};
+
+type LegacyPermissionRow = {
+  page_key: string | null;
+  can_view: boolean | null;
+  can_edit: boolean | null;
+  can_delete: boolean | null;
 };
 
 export function AuthProvider({ children }: { children: ReactNode }) {
@@ -69,7 +99,11 @@ export function AuthProvider({ children }: { children: ReactNode }) {
   const [profile, setProfile] = useState<UserProfile | null>(null);
   const [permissions, setPermissions] = useState<Record<string, boolean>>({});
   const [loading, setLoading] = useState(true);
-  const roleSchemaPreferenceRef = useRef<'roles' | 'clinic_roles'>('roles');
+  const roleSchemaPreferenceRef = useRef<'roles' | 'clinic_roles'>(getStoredRoleSchemaPreference());
+  const setRoleSchemaPreference = useCallback((mode: 'roles' | 'clinic_roles') => {
+    roleSchemaPreferenceRef.current = mode;
+    storeRoleSchemaPreference(mode);
+  }, []);
 
   const fetchRolePermissions = useCallback(async (roleId: string): Promise<Record<string, boolean>> => {
     try {
@@ -80,7 +114,9 @@ export function AuthProvider({ children }: { children: ReactNode }) {
 
       if (!modernResult.error) {
         const permMap: Record<string, boolean> = {};
-        modernResult.data?.forEach((row: any) => {
+        const modernRows = (modernResult.data || []) as ModernPermissionRow[];
+
+        modernRows.forEach((row) => {
           const enabled = Boolean(row.can_read || row.can_write);
           const keys = resolvePermissionKeys(String(row.permission_key || ''));
 
@@ -116,7 +152,6 @@ export function AuthProvider({ children }: { children: ReactNode }) {
         .eq('role_id', roleId);
 
       if (legacyResult.error) {
-        const legacyMessage = legacyResult.error.message || '';
         if (isMissingTableError(legacyResult.error, 'role_permissions')) {
           return {};
         }
@@ -124,7 +159,9 @@ export function AuthProvider({ children }: { children: ReactNode }) {
       }
 
       const permMap: Record<string, boolean> = {};
-      legacyResult.data?.forEach((row: any) => {
+      const legacyRows = (legacyResult.data || []) as LegacyPermissionRow[];
+
+      legacyRows.forEach((row) => {
         const enabled = Boolean(row.can_view || row.can_edit || row.can_delete);
         const keys = resolvePermissionKeys(String(row.page_key || ''));
         keys.forEach((key) => {
@@ -211,23 +248,23 @@ export function AuthProvider({ children }: { children: ReactNode }) {
         if (!legacy.missingTable) {
           return legacy.id;
         }
-        roleSchemaPreferenceRef.current = 'roles';
+        setRoleSchemaPreference('roles');
       }
 
       const modern = await resolveFromModernRoles();
       if (!modern.missingTable) {
-        roleSchemaPreferenceRef.current = 'roles';
+        setRoleSchemaPreference('roles');
         return modern.id;
       }
 
-      roleSchemaPreferenceRef.current = 'clinic_roles';
+      setRoleSchemaPreference('clinic_roles');
       const legacy = await resolveFromLegacyRoles();
       return legacy.id;
     } catch (error) {
       console.error('Failed to resolve role id:', error);
       return null;
     }
-  }, []);
+  }, [setRoleSchemaPreference]);
 
   const fetchProfile = useCallback(async (userId: string) => {
     try {
