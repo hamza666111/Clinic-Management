@@ -761,7 +761,22 @@ export default function StaffRolesPage() {
       let createdRole: Role;
 
       if (roleSchemaMode === 'clinic_roles') {
-        createdRole = await createRoleViaEdgeFunction();
+        try {
+          createdRole = await createRoleViaEdgeFunction();
+        } catch (edgeError: unknown) {
+          const edgeMessage = getErrorMessage(edgeError).toLowerCase();
+          const shouldFallbackToDirectInsert =
+            edgeMessage.includes('name, email, and password are required') ||
+            edgeMessage.includes('unknown action') ||
+            edgeMessage.includes('non-2xx') ||
+            edgeMessage.includes('bad request');
+
+          if (!shouldFallbackToDirectInsert) {
+            throw edgeError;
+          }
+
+          createdRole = await createRoleDirect();
+        }
       } else {
         try {
           createdRole = await createRoleDirect();
@@ -782,6 +797,11 @@ export default function StaffRolesPage() {
       toast.success('Role created successfully');
     } catch (err: unknown) {
       const message = getErrorMessage(err);
+
+      if (isPermissionDeniedError(err)) {
+        toast.error('Role creation blocked by Supabase RLS policy. Run the SQL policy fix in Supabase SQL Editor, then try again.');
+        return;
+      }
 
       if (message.includes('Name, email, and password are required')) {
         toast.error('Please deploy the latest create-user edge function, then try adding the role again.');
