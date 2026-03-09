@@ -146,20 +146,16 @@ export default function MedicineRow({
     ? (DOSE_QUANTITY_PRESETS[med.medicine_type as keyof typeof DOSE_QUANTITY_PRESETS] || DEFAULT_DOSE_QUANTITIES)
     : DEFAULT_DOSE_QUANTITIES;
 
+  const matchedMedicine = medicines.find(m =>
+    m.medicine_name.toLowerCase() === med.medicine_name.toLowerCase() &&
+    (m.strength || '').toLowerCase() === (med.strength || '').toLowerCase() &&
+    m.medicine_type === med.medicine_type
+  ) || null;
+
+  const isCustomMedicine = med.medicine_name === '__custom__' || (!!med.medicine_name && !matchedMedicine);
+
   const isDurationCustom = med.duration === '__custom__';
   const isInstructionCustom = med.special_instructions === '__custom__';
-
-  const handleMedicineSelect = (selectedName: string) => {
-    const medicine = medicines.find(m =>
-      `${m.medicine_name} (${m.strength}) - ${m.medicine_type}` === selectedName
-    );
-
-    if (medicine) {
-      onSelectMedicine(medicine);
-    } else {
-      onChange('medicine_name', selectedName);
-    }
-  };
 
   return (
     <div className="bg-gray-50 border border-gray-200 rounded-2xl p-4 space-y-3">
@@ -179,25 +175,49 @@ export default function MedicineRow({
       <div className="grid grid-cols-2 gap-3">
         <div className="col-span-2">
           <label className="block text-xs font-medium text-gray-600 mb-1">Medicine Name *</label>
-          <div className="relative">
-            <input
-              value={med.medicine_name}
-              onChange={e => onChange('medicine_name', e.target.value)}
-              list={`med-list-${index}`}
-              placeholder="Type or select medicine..."
-              className="w-full px-3 py-2 border border-gray-200 rounded-lg text-sm focus:outline-none focus:ring-2 focus:ring-sky-300 bg-white"
-            />
-            <datalist id={`med-list-${index}`}>
-              {medicines.map(m => (
-                <option
-                  key={m.id}
-                  value={`${m.medicine_name} (${m.strength}) - ${m.medicine_type}`}
-                />
-              ))}
-            </datalist>
+          <div className="space-y-1.5">
+            <div className="relative">
+              <select
+                value={matchedMedicine?.id || (isCustomMedicine ? '__custom__' : '')}
+                onChange={e => {
+                  const selected = e.target.value;
+                  if (!selected) {
+                    onChange('medicine_name', '');
+                    return;
+                  }
+                  if (selected === '__custom__') {
+                    onChange('medicine_name', '__custom__');
+                    return;
+                  }
+
+                  const selectedMedicine = medicines.find(m => m.id === selected);
+                  if (selectedMedicine) {
+                    onSelectMedicine(selectedMedicine);
+                  }
+                }}
+                className="w-full appearance-none px-3 py-2 pr-8 border border-gray-200 rounded-lg text-sm focus:outline-none focus:ring-2 focus:ring-sky-300 bg-white"
+              >
+                <option value="">Select medicine...</option>
+                {medicines.map(m => (
+                  <option key={m.id} value={m.id}>
+                    {`${m.medicine_name} (${m.strength}) - ${m.medicine_type}`}
+                  </option>
+                ))}
+                <option value="__custom__">Custom medicine...</option>
+              </select>
+              <ChevronDown className="pointer-events-none absolute right-2.5 top-1/2 -translate-y-1/2 w-3.5 h-3.5 text-gray-400" />
+            </div>
+            {isCustomMedicine && (
+              <input
+                value={med.medicine_name === '__custom__' ? '' : med.medicine_name}
+                onChange={e => onChange('medicine_name', e.target.value)}
+                placeholder="Type custom medicine name..."
+                className="w-full px-3 py-2 border border-gray-200 rounded-lg text-sm focus:outline-none focus:ring-2 focus:ring-sky-300 bg-white"
+              />
+            )}
           </div>
           <p className="text-xs text-gray-400 mt-1">
-            Select from list or type new medicine name to add to master list
+            Select from list or choose custom medicine
           </p>
         </div>
 

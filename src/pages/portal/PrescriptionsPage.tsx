@@ -117,42 +117,33 @@ export default function PrescriptionsPage() {
     });
   };
 
-  const handleMedicineNameChange = async (i: number, value: string) => {
+  const handleMedicineNameChange = (i: number, value: string) => {
     updateMedicine(i, 'medicine_name', value);
 
-    if (!value.trim()) return;
+    if (!value.trim() || value === '__custom__') return;
 
-    const fullMatch = medicines.find(m =>
-      `${m.medicine_name} (${m.strength}) - ${m.medicine_type}` === value
+    const normalized = value.trim().toLowerCase();
+    const exactMatch = medicines.find(m =>
+      m.medicine_name.toLowerCase() === normalized ||
+      `${m.medicine_name} (${m.strength}) - ${m.medicine_type}`.toLowerCase() === normalized
     );
 
-    if (fullMatch) {
-      handleSelectMedicine(i, fullMatch);
+    if (exactMatch) {
+      handleSelectMedicine(i, exactMatch);
+    }
+  };
+
+  const treatmentMatch = serviceNames.find(
+    service => service.toLowerCase() === form.treatments.trim().toLowerCase()
+  ) || '';
+  const isCustomTreatment = form.treatments === '__custom__' || (!!form.treatments && !treatmentMatch);
+
+  const handleTreatmentSelect = (selected: string) => {
+    if (selected === '__custom__') {
+      setForm(prev => ({ ...prev, treatments: '__custom__' }));
       return;
     }
-
-    const nameMatch = medicines.find(m =>
-      m.medicine_name.toLowerCase() === value.toLowerCase()
-    );
-
-    if (!nameMatch) {
-      const med = form.medicines[i];
-      if (med.medicine_type && value.trim()) {
-        const { data } = await supabase.from('medicines').insert({
-          medicine_name: value.trim(),
-          medicine_type: med.medicine_type,
-          strength: med.strength || '',
-          form: '',
-          default_dosage: '',
-          clinic_id: profile?.clinic_id || null,
-          created_by: profile?.id || null,
-        }).select().maybeSingle();
-        if (data) {
-          setMedicines(prev => [...prev, data as Medicine]);
-          toast.success('Medicine added to master list');
-        }
-      }
-    }
+    setForm(prev => ({ ...prev, treatments: selected }));
   };
 
   const handleSave = async (e: React.FormEvent) => {
@@ -297,16 +288,25 @@ export default function PrescriptionsPage() {
 
           <div>
             <label className="block text-sm font-medium text-gray-700 mb-1.5">Treatments / Services</label>
-            <input
-              value={form.treatments}
-              onChange={e => setForm({...form, treatments: e.target.value})}
-              list="treatment-list"
-              placeholder="Select or type treatments performed..."
-              className="w-full px-3.5 py-2.5 border border-gray-200 rounded-xl focus:outline-none focus:ring-2 focus:ring-sky-300 text-sm"
-            />
-            <datalist id="treatment-list">
-              {serviceNames.map(s => <option key={s} value={s} />)}
-            </datalist>
+            <div className="space-y-2">
+              <select
+                value={treatmentMatch || (isCustomTreatment ? '__custom__' : '')}
+                onChange={e => handleTreatmentSelect(e.target.value)}
+                className="w-full px-3.5 py-2.5 border border-gray-200 rounded-xl focus:outline-none focus:ring-2 focus:ring-sky-300 text-sm bg-white"
+              >
+                <option value="">Select treatment...</option>
+                {serviceNames.map(s => <option key={s} value={s}>{s}</option>)}
+                <option value="__custom__">Custom treatment...</option>
+              </select>
+              {isCustomTreatment && (
+                <input
+                  value={form.treatments === '__custom__' ? '' : form.treatments}
+                  onChange={e => setForm({ ...form, treatments: e.target.value })}
+                  placeholder="Type custom treatment..."
+                  className="w-full px-3.5 py-2.5 border border-gray-200 rounded-xl focus:outline-none focus:ring-2 focus:ring-sky-300 text-sm"
+                />
+              )}
+            </div>
           </div>
 
           <div>

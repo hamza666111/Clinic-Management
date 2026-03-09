@@ -22,7 +22,8 @@ Deno.serve(async (req: Request) => {
   }
 
   try {
-    const ALLOWED_USER_ROLES = ["admin", "clinic_admin", "doctor", "assistant", "receptionist"];
+    const CORE_USER_ROLES = ["admin", "clinic_admin", "doctor", "assistant", "receptionist"];
+    const normalizeRoleName = (value: string) => value.trim().toLowerCase().replace(/\s+/g, "_");
 
     const isMissingTableError = (
       errorLike: { message?: string; code?: string; status?: number } | string | null | undefined,
@@ -94,6 +95,77 @@ Deno.serve(async (req: Request) => {
       } catch (err) {
         console.error("resolveDynamicRoleId failed:", err);
         return null;
+      }
+    };
+
+    const isKnownRole = async (roleName: string, clinicId?: string | null) => {
+      if (CORE_USER_ROLES.includes(roleName)) {
+        return true;
+      }
+
+      try {
+        const checkModernRole = async () => {
+          if (clinicId) {
+            const clinicRoleRes = await supabaseAdmin
+              .from("roles")
+              .select("id")
+              .eq("name", roleName)
+              .eq("clinic_id", clinicId)
+              .maybeSingle();
+
+            if (!clinicRoleRes.error && clinicRoleRes.data?.id) {
+              return { found: true, missingTable: false };
+            }
+
+            if (clinicRoleRes.error && !isMissingTableError(clinicRoleRes.error.message || "", "roles")) {
+              throw clinicRoleRes.error;
+            }
+          }
+
+          const systemRoleRes = await supabaseAdmin
+            .from("roles")
+            .select("id")
+            .eq("name", roleName)
+            .eq("is_system_default", true)
+            .maybeSingle();
+
+          if (systemRoleRes.error) {
+            if (isMissingTableError(systemRoleRes.error.message || "", "roles")) {
+              return { found: false, missingTable: true };
+            }
+            throw systemRoleRes.error;
+          }
+
+          return { found: Boolean(systemRoleRes.data?.id), missingTable: false };
+        };
+
+        const modernCheck = await checkModernRole();
+        if (!modernCheck.missingTable) {
+          return modernCheck.found;
+        }
+
+        if (!clinicId) {
+          return false;
+        }
+
+        const legacyRoleRes = await supabaseAdmin
+          .from("clinic_roles")
+          .select("id")
+          .eq("role_name", roleName)
+          .eq("clinic_id", clinicId)
+          .maybeSingle();
+
+        if (legacyRoleRes.error) {
+          if (isMissingTableError(legacyRoleRes.error.message || "", "clinic_roles")) {
+            return false;
+          }
+          throw legacyRoleRes.error;
+        }
+
+        return Boolean(legacyRoleRes.data?.id);
+      } catch (err) {
+        console.error("isKnownRole failed:", err);
+        return false;
       }
     };
 
@@ -359,14 +431,16 @@ Deno.serve(async (req: Request) => {
         });
       }
 
-      if (role !== undefined && !ALLOWED_USER_ROLES.includes(role)) {
+      const normalizedRole = role !== undefined ? normalizeRoleName(String(role)) : undefined;
+
+      if (role !== undefined && !normalizedRole) {
         return new Response(JSON.stringify({ error: "Invalid role selected." }), {
           status: 400,
           headers: { ...corsHeaders, "Content-Type": "application/json" },
         });
       }
 
-      if (callerProfile.role === "clinic_admin" && role === "admin") {
+      if (callerProfile.role === "clinic_admin" && normalizedRole === "admin") {
         return new Response(JSON.stringify({ error: "Clinic admins cannot assign admin role." }), {
           status: 403,
           headers: { ...corsHeaders, "Content-Type": "application/json" },
@@ -375,7 +449,7 @@ Deno.serve(async (req: Request) => {
 
       const updateData: Record<string, unknown> = {};
       if (name !== undefined) updateData.name = name;
-      if (role !== undefined) updateData.role = role;
+      if (normalizedRole !== undefined) updateData.role = normalizedRole;
       if (clinic_id !== undefined) updateData.clinic_id = clinic_id;
       if (is_active !== undefined) updateData.is_active = is_active;
 
@@ -393,8 +467,17 @@ Deno.serve(async (req: Request) => {
           });
         }
 
-        const nextRole = (role as string | undefined) || currentProfile?.role || "receptionist";
+        const nextRole = normalizedRole || currentProfile?.role || "receptionist";
         const nextClinicId = clinic_id !== undefined ? clinic_id : currentProfile?.clinic_id || null;
+
+        const roleIsAllowed = await isKnownRole(nextRole, nextClinicId);
+        if (!roleIsAllowed) {
+          return new Response(JSON.stringify({ error: "Invalid role selected." }), {
+            status: 400,
+            headers: { ...corsHeaders, "Content-Type": "application/json" },
+          });
+        }
+
         updateData.dynamic_role_id = await resolveDynamicRoleId(nextRole, nextClinicId);
       }
 
@@ -413,7 +496,7 @@ Deno.serve(async (req: Request) => {
       if (name !== undefined || role !== undefined) {
         const metaUpdate: Record<string, unknown> = {};
         if (name !== undefined) metaUpdate.name = name;
-        if (role !== undefined) metaUpdate.role = role;
+        if (normalizedRole !== undefined) metaUpdate.role = normalizedRole;
         await supabaseAdmin.auth.admin.updateUserById(user_id, { user_metadata: metaUpdate });
       }
 
@@ -438,9 +521,21 @@ Deno.serve(async (req: Request) => {
       });
     }
 
-    const finalRole = role || "receptionist";
+    const finalRole = normalizeRoleName(String(role || "receptionist"));
 
-    if (!ALLOWED_USER_ROLES.includes(finalRole)) {
+    const targetClinicId = callerProfile.role === "clinic_admin"
+      ? callerProfile.clinic_id || null
+      : (clinic_id || null);
+
+    if (finalRole !== "admin" && !targetClinicId) {
+      return new Response(JSON.stringify({ error: "Please select a clinic for this user." }), {
+        status: 400,
+        headers: { ...corsHeaders, "Content-Type": "application/json" },
+      });
+    }
+
+    const roleIsAllowed = await isKnownRole(finalRole, targetClinicId);
+    if (!roleIsAllowed) {
       return new Response(JSON.stringify({ error: "Invalid role selected." }), {
         status: 400,
         headers: { ...corsHeaders, "Content-Type": "application/json" },
@@ -454,7 +549,7 @@ Deno.serve(async (req: Request) => {
       });
     }
 
-    const dynamicRoleId = await resolveDynamicRoleId(finalRole, clinic_id || null);
+    const dynamicRoleId = await resolveDynamicRoleId(finalRole, targetClinicId);
 
     const { data, error } = await supabaseAdmin.auth.admin.createUser({
       email,
@@ -475,7 +570,7 @@ Deno.serve(async (req: Request) => {
       name,
       email,
       role: finalRole,
-      clinic_id: clinic_id || null,
+      clinic_id: targetClinicId,
       dynamic_role_id: dynamicRoleId,
       is_active: true,
     });

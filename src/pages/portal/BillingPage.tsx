@@ -221,7 +221,7 @@ export default function BillingPage() {
       patient_id: form.patient_id,
       clinic_id: form.clinic_id || null,
       doctor_id: (profile?.role === 'admin' || profile?.role === 'clinic_admin') ? (form.doctor_id || profile?.id) : profile?.id,
-      items: form.items.filter(i => i.description),
+      items: form.items.filter(i => i.description && i.description !== '__custom__'),
       doctor_fee: Number(form.doctor_fee || 0),
       total_amount: totalAmount,
       amount_paid: form.status === 'partial' ? Number(form.amount_paid || 0) : form.status === 'paid' ? totalAmount : 0,
@@ -577,13 +577,41 @@ export default function BillingPage() {
               {form.items.map((item, i) => (
                 <div key={i} className="grid grid-cols-12 px-3 py-2 border-t border-gray-100 gap-2 items-center">
                   <div className="col-span-5">
-                    <input
-                      value={item.description}
-                      onChange={e => updateItem(i, 'description', e.target.value)}
-                      list="service-list"
-                      placeholder="Select or type service..."
-                      className="w-full px-2 py-1.5 border border-gray-200 rounded-lg text-sm focus:outline-none focus:ring-1 focus:ring-sky-300"
-                    />
+                    {(() => {
+                      const matchedService = serviceNames.find(
+                        s => s.toLowerCase() === item.description.trim().toLowerCase()
+                      ) || '';
+                      const isCustomService = item.description === '__custom__' || (!!item.description && !matchedService);
+
+                      return (
+                        <div className="space-y-1.5">
+                          <select
+                            value={matchedService || (isCustomService ? '__custom__' : '')}
+                            onChange={e => {
+                              const selected = e.target.value;
+                              if (selected === '__custom__') {
+                                updateItem(i, 'description', '__custom__');
+                                return;
+                              }
+                              updateItem(i, 'description', selected);
+                            }}
+                            className="w-full px-2 py-1.5 border border-gray-200 rounded-lg text-sm focus:outline-none focus:ring-1 focus:ring-sky-300 bg-white"
+                          >
+                            <option value="">Select service...</option>
+                            {serviceNames.map(s => <option key={s} value={s}>{s}</option>)}
+                            <option value="__custom__">Custom service...</option>
+                          </select>
+                          {isCustomService && (
+                            <input
+                              value={item.description === '__custom__' ? '' : item.description}
+                              onChange={e => updateItem(i, 'description', e.target.value)}
+                              placeholder="Type custom service..."
+                              className="w-full px-2 py-1.5 border border-gray-200 rounded-lg text-sm focus:outline-none focus:ring-1 focus:ring-sky-300"
+                            />
+                          )}
+                        </div>
+                      );
+                    })()}
                   </div>
                   <div className="col-span-2">
                     <input type="number" min="1" value={item.quantity} onChange={e => updateItem(i, 'quantity', Number(e.target.value))} className="w-full px-2 py-1.5 border border-gray-200 rounded-lg text-sm text-center focus:outline-none focus:ring-1 focus:ring-sky-300" />
@@ -602,9 +630,6 @@ export default function BillingPage() {
                 </div>
               ))}
             </div>
-            <datalist id="service-list">
-              {serviceNames.map(s => <option key={s} value={s} />)}
-            </datalist>
             {services.some(s => s.category) && (
               <p className="text-xs text-gray-400 mt-1.5">Prices auto-fill from the service master list when a service is selected.</p>
             )}

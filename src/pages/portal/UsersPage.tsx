@@ -24,8 +24,47 @@ const ROLE_LABELS: Record<string, string> = {
   receptionist: 'Receptionist',
 };
 
-const ALL_ROLES = ['admin', 'doctor', 'assistant', 'receptionist'] as const;
-const CLINIC_ROLES = ['doctor', 'assistant', 'receptionist'] as const;
+const CORE_ROLES = ['admin', 'clinic_admin', 'doctor', 'assistant', 'receptionist'] as const;
+
+const ROLE_PRIORITY = ['admin', 'clinic_admin', 'doctor', 'assistant', 'receptionist'];
+
+const normalizeRoleName = (roleName: string) => roleName.trim().toLowerCase().replace(/\s+/g, '_');
+
+const formatRoleLabel = (roleName: string) =>
+  ROLE_LABELS[roleName] || roleName.replace(/_/g, ' ').replace(/\b\w/g, c => c.toUpperCase());
+
+const sortRoleNames = (roles: string[]) =>
+  [...roles].sort((a, b) => {
+    const aIdx = ROLE_PRIORITY.indexOf(a);
+    const bIdx = ROLE_PRIORITY.indexOf(b);
+    if (aIdx !== bIdx) {
+      if (aIdx === -1) return 1;
+      if (bIdx === -1) return -1;
+      return aIdx - bIdx;
+    }
+    return a.localeCompare(b);
+  });
+
+const isMissingTableError = (
+  errorLike: { message?: string; code?: string; status?: number } | null | undefined,
+  table: string
+) => {
+  if (!errorLike) return false;
+  const tableName = table.toLowerCase();
+  const message = (errorLike.message || '').toLowerCase();
+  const code = (errorLike.code || '').toUpperCase();
+
+  return (
+    code === '42P01' ||
+    code === 'PGRST205' ||
+    errorLike.status === 404 ||
+    message.includes(`public.${tableName}`) ||
+    message.includes(`relation \"${tableName}\"`) ||
+    message.includes(`table '${tableName}'`) ||
+    message.includes(`table \"public.${tableName}\"`) ||
+    message.includes(`could not find the table 'public.${tableName}'`)
+  );
+};
 
 interface CreateFormData {
   name: string;
@@ -66,6 +105,7 @@ export default function UsersPage() {
   const [loading, setLoading] = useState(true);
   const [search, setSearch] = useState('');
   const [filterRole, setFilterRole] = useState('');
+  const [roleOptions, setRoleOptions] = useState<string[]>([...CORE_ROLES]);
 
   const [showCreate, setShowCreate] = useState(false);
   const [showEdit, setShowEdit] = useState(false);
@@ -81,6 +121,66 @@ export default function UsersPage() {
 
   const isGlobalAdmin = myProfile?.role === 'admin';
   const isClinicAdmin = myProfile?.role === 'clinic_admin';
+
+  const assignableRoles = isGlobalAdmin
+    ? roleOptions
+    : roleOptions.filter(role => role !== 'admin' && role !== 'clinic_admin');
+
+  const fetchRoleOptions = useCallback(async () => {
+    const normalizedRoles = new Set<string>(CORE_ROLES.map(role => normalizeRoleName(role)));
+
+    const clinicId = myProfile?.clinic_id || null;
+
+    try {
+      let modernQuery = supabase.from('roles').select('name, clinic_id, is_system_default').order('name');
+
+      if (!isGlobalAdmin && clinicId) {
+        modernQuery = modernQuery.or(`is_system_default.eq.true,clinic_id.eq.${clinicId}`);
+      }
+
+      const modernRes = await modernQuery;
+
+      if (!modernRes.error) {
+        (modernRes.data || []).forEach((roleRow: { name: string }) => {
+          const normalized = normalizeRoleName(roleRow.name);
+          if (normalized) normalizedRoles.add(normalized);
+        });
+
+        setRoleOptions(sortRoleNames(Array.from(normalizedRoles)));
+        return;
+      }
+
+      if (!isMissingTableError({ message: modernRes.error.message, code: modernRes.error.code, status: modernRes.status }, 'roles')) {
+        throw modernRes.error;
+      }
+
+      let legacyQuery = supabase.from('clinic_roles').select('role_name, clinic_id').order('role_name');
+
+      if (!isGlobalAdmin && clinicId) {
+        legacyQuery = legacyQuery.eq('clinic_id', clinicId);
+      }
+
+      const legacyRes = await legacyQuery;
+      if (legacyRes.error) {
+        if (!isMissingTableError({ message: legacyRes.error.message, code: legacyRes.error.code, status: legacyRes.status }, 'clinic_roles')) {
+          throw legacyRes.error;
+        }
+
+        setRoleOptions(sortRoleNames(Array.from(normalizedRoles)));
+        return;
+      }
+
+      (legacyRes.data || []).forEach((roleRow: { role_name: string }) => {
+        const normalized = normalizeRoleName(roleRow.role_name);
+        if (normalized) normalizedRoles.add(normalized);
+      });
+
+      setRoleOptions(sortRoleNames(Array.from(normalizedRoles)));
+    } catch (err) {
+      console.error('Failed to load role options:', err);
+      setRoleOptions(sortRoleNames(Array.from(normalizedRoles)));
+    }
+  }, [myProfile?.clinic_id, isGlobalAdmin]);
 
   const fetchUsers = useCallback(async () => {
     if (!session) {
@@ -146,6 +246,33 @@ export default function UsersPage() {
       .order('clinic_name')
       .then(({ data }) => setClinics(data || []));
   }, []);
+
+  useEffect(() => {
+    if (!myProfile) return;
+    fetchRoleOptions();
+  }, [myProfile, fetchRoleOptions]);
+
+  useEffect(() => {
+    if (filterRole && !roleOptions.includes(filterRole)) {
+      setFilterRole('');
+    }
+  }, [filterRole, roleOptions]);
+
+  useEffect(() => {
+    if (!assignableRoles.length) return;
+
+    setCreateForm(prev =>
+      assignableRoles.includes(prev.role)
+        ? prev
+        : { ...prev, role: assignableRoles[0] }
+    );
+
+    setEditForm(prev =>
+      assignableRoles.includes(prev.role) || prev.role === 'admin'
+        ? prev
+        : { ...prev, role: assignableRoles[0] }
+    );
+  }, [assignableRoles]);
 
   const handleCreate = async (e: React.FormEvent) => {
     e.preventDefault();
@@ -316,8 +443,6 @@ export default function UsersPage() {
 
   const clinicName = (id: string | null) => clinics.find(c => c.id === id)?.clinic_name || '—';
 
-  const allowedRoles = isGlobalAdmin ? ALL_ROLES : CLINIC_ROLES;
-
   return (
     <div className="p-6 space-y-6">
       <div className="flex items-center justify-between">
@@ -352,9 +477,9 @@ export default function UsersPage() {
             className="px-4 py-2.5 border border-gray-200 rounded-xl focus:ring-2 focus:ring-sky-500 focus:border-sky-500"
           >
             <option value="">All Roles</option>
-            {allowedRoles.map((role) => (
+            {roleOptions.map((role) => (
               <option key={role} value={role}>
-                {ROLE_LABELS[role]}
+                {formatRoleLabel(role)}
               </option>
             ))}
           </select>
@@ -395,7 +520,7 @@ export default function UsersPage() {
                     <div className="flex items-center gap-3 mb-1">
                       <h3 className="font-semibold text-gray-900">{user.name}</h3>
                       <span className={`px-2.5 py-0.5 rounded-full text-xs font-medium ${ROLE_COLORS[user.role] || 'bg-gray-100 text-gray-700'}`}>
-                        {ROLE_LABELS[user.role] || user.role}
+                        {formatRoleLabel(user.role)}
                       </span>
                       {!user.is_active && (
                         <span className="px-2.5 py-0.5 rounded-full text-xs font-medium bg-gray-100 text-gray-600">
@@ -496,9 +621,9 @@ export default function UsersPage() {
                 className="w-full px-4 py-2.5 border border-gray-200 rounded-xl focus:ring-2 focus:ring-sky-500 focus:border-sky-500"
                 required
               >
-                {allowedRoles.map((role) => (
+                {assignableRoles.map((role) => (
                   <option key={role} value={role}>
-                    {ROLE_LABELS[role]}
+                    {formatRoleLabel(role)}
                   </option>
                 ))}
               </select>
@@ -566,9 +691,9 @@ export default function UsersPage() {
                 className="w-full px-4 py-2.5 border border-gray-200 rounded-xl focus:ring-2 focus:ring-sky-500 focus:border-sky-500"
                 required
               >
-                {allowedRoles.map((role) => (
+                {assignableRoles.map((role) => (
                   <option key={role} value={role}>
-                    {ROLE_LABELS[role]}
+                    {formatRoleLabel(role)}
                   </option>
                 ))}
               </select>
