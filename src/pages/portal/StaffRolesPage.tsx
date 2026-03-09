@@ -77,6 +77,7 @@ type RoleSchemaMode = 'roles' | 'clinic_roles';
 type PermissionSchemaMode = 'modern' | 'legacy';
 
 const ROLE_SCHEMA_PREFERENCE_KEY = 'clinic_management:role_schema_mode';
+const PERMISSION_SCHEMA_PREFERENCE_KEY = 'clinic_management:permission_schema_mode';
 
 const ROLE_PRIORITY = ['admin', 'manager', 'doctor', 'assistant', 'receptionist', 'barber', 'clinic_admin'];
 
@@ -135,6 +136,22 @@ const getStoredRoleSchemaMode = (): RoleSchemaMode => {
 const storeRoleSchemaMode = (mode: RoleSchemaMode) => {
   if (typeof window === 'undefined') return;
   window.localStorage.setItem(ROLE_SCHEMA_PREFERENCE_KEY, mode);
+};
+
+const getStoredPermissionSchemaMode = (): PermissionSchemaMode => {
+  if (typeof window === 'undefined') return 'legacy';
+
+  const raw = window.localStorage.getItem(PERMISSION_SCHEMA_PREFERENCE_KEY);
+  if (raw === 'modern' || raw === 'legacy') {
+    return raw;
+  }
+
+  return getStoredRoleSchemaMode() === 'clinic_roles' ? 'legacy' : 'modern';
+};
+
+const storePermissionSchemaMode = (mode: PermissionSchemaMode) => {
+  if (typeof window === 'undefined') return;
+  window.localStorage.setItem(PERMISSION_SCHEMA_PREFERENCE_KEY, mode);
 };
 
 const normalizeRoleLabel = (role: string) => role.replace(/_/g, ' ').replace(/\b\w/g, (c) => c.toUpperCase());
@@ -255,7 +272,7 @@ export default function StaffRolesPage() {
   const [loadingRoles, setLoadingRoles] = useState(false);
 
   const [permissions, setPermissions] = useState<Record<string, Permission>>({});
-  const [permissionSchemaMode, setPermissionSchemaMode] = useState<PermissionSchemaMode>('modern');
+  const [permissionSchemaMode, setPermissionSchemaMode] = useState<PermissionSchemaMode>(() => getStoredPermissionSchemaMode());
   const [savingPermissions, setSavingPermissions] = useState(false);
 
   const [newRoleName, setNewRoleName] = useState('');
@@ -287,6 +304,11 @@ export default function StaffRolesPage() {
   const setRoleSchemaModeWithPreference = useCallback((mode: RoleSchemaMode) => {
     setRoleSchemaMode(mode);
     storeRoleSchemaMode(mode);
+  }, []);
+
+  const setPermissionSchemaModeWithPreference = useCallback((mode: PermissionSchemaMode) => {
+    setPermissionSchemaMode(mode);
+    storePermissionSchemaMode(mode);
   }, []);
 
   const isPermissionDeniedError = (error: unknown) => {
@@ -401,6 +423,7 @@ export default function StaffRolesPage() {
           normalizedRoles = (modernResult.data || []) as Role[];
         } else {
           setRoleSchemaModeWithPreference('clinic_roles');
+          setPermissionSchemaModeWithPreference('legacy');
           normalizedRoles = ((legacyResult.data || []) as LegacyRoleRow[]).map((row) => ({
             id: row.id,
             name: row.role_name,
@@ -420,6 +443,7 @@ export default function StaffRolesPage() {
           if (legacyResult.error) throw legacyResult.error;
 
           setRoleSchemaModeWithPreference('clinic_roles');
+          setPermissionSchemaModeWithPreference('legacy');
           normalizedRoles = ((legacyResult.data || []) as LegacyRoleRow[]).map((row) => ({
             id: row.id,
             name: row.role_name,
@@ -450,7 +474,14 @@ export default function StaffRolesPage() {
     } finally {
       setLoadingRoles(false);
     }
-  }, [profile, requiresClinicSelection, effectiveClinicId, roleSchemaMode, setRoleSchemaModeWithPreference]);
+  }, [
+    profile,
+    requiresClinicSelection,
+    effectiveClinicId,
+    roleSchemaMode,
+    setRoleSchemaModeWithPreference,
+    setPermissionSchemaModeWithPreference,
+  ]);
 
   const fetchTeam = useCallback(async () => {
     if (!profile) return;
@@ -481,16 +512,10 @@ export default function StaffRolesPage() {
 
   const fetchPermissions = useCallback(async (roleId: string, roleName: string) => {
     try {
-      const modernResult = await supabase
-        .from('role_permissions')
-        .select('permission_key, can_read, can_write')
-        .eq('role_id', roleId);
-
-      if (!modernResult.error) {
+      const applyModernRows = (rows: ModernPermissionRow[]) => {
         const overrides: Record<string, boolean> = {};
-        const modernRows = (modernResult.data || []) as ModernPermissionRow[];
 
-        modernRows.forEach((row) => {
+        rows.forEach((row) => {
           const enabled = Boolean(row.can_read || row.can_write);
           const keys = resolvePermissionKeys(String(row.permission_key || ''));
 
@@ -504,51 +529,105 @@ export default function StaffRolesPage() {
           });
         });
 
-        setPermissionSchemaMode('modern');
+        setPermissionSchemaModeWithPreference('modern');
         setPermissions(buildPermissionState(roleName, overrides));
-        return;
-      }
+      };
 
-      const modernMessage = modernResult.error.message || '';
-      if (isMissingTableError(modernResult.error, 'role_permissions')) {
-        setPermissionSchemaMode('modern');
-        setPermissions(buildPermissionState(roleName, getDefaultPermissionsForRole(roleName)));
-        return;
-      }
+      const applyLegacyRows = (rows: LegacyPermissionRow[]) => {
+        const overrides: Record<string, boolean> = {};
 
-      const shouldFallbackToLegacy =
-        isMissingColumnError(modernMessage, 'permission_key') ||
-        isMissingColumnError(modernMessage, 'can_read') ||
-        isMissingColumnError(modernMessage, 'can_write');
-
-      if (!shouldFallbackToLegacy) {
-        throw modernResult.error;
-      }
-
-      const legacyResult = await supabase
-        .from('role_permissions')
-        .select('page_key, can_view, can_edit, can_delete')
-        .eq('role_id', roleId);
-
-      if (legacyResult.error) throw legacyResult.error;
-
-      const overrides: Record<string, boolean> = {};
-      const legacyRows = (legacyResult.data || []) as LegacyPermissionRow[];
-
-      legacyRows.forEach((row) => {
-        const enabled = Boolean(row.can_view || row.can_edit || row.can_delete);
-        const keys = resolvePermissionKeys(String(row.page_key || ''));
-        keys.forEach((key) => {
-          overrides[key] = enabled;
+        rows.forEach((row) => {
+          const enabled = Boolean(row.can_view || row.can_edit || row.can_delete);
+          const keys = resolvePermissionKeys(String(row.page_key || ''));
+          keys.forEach((key) => {
+            overrides[key] = enabled;
+          });
         });
-      });
 
-      setPermissionSchemaMode('legacy');
-      setPermissions(buildPermissionState(roleName, overrides));
+        setPermissionSchemaModeWithPreference('legacy');
+        setPermissions(buildPermissionState(roleName, overrides));
+      };
+
+      const loadModernPermissions = async (): Promise<boolean> => {
+        const modernResult = await supabase
+          .from('role_permissions')
+          .select('permission_key, can_read, can_write')
+          .eq('role_id', roleId);
+
+        if (!modernResult.error) {
+          applyModernRows((modernResult.data || []) as ModernPermissionRow[]);
+          return true;
+        }
+
+        const modernMessage = modernResult.error.message || '';
+        if (isMissingTableError(modernResult.error, 'role_permissions')) {
+          setPermissionSchemaModeWithPreference('modern');
+          setPermissions(buildPermissionState(roleName, getDefaultPermissionsForRole(roleName)));
+          return true;
+        }
+
+        const shouldFallbackToLegacy =
+          isMissingColumnError(modernMessage, 'permission_key') ||
+          isMissingColumnError(modernMessage, 'can_read') ||
+          isMissingColumnError(modernMessage, 'can_write');
+
+        if (shouldFallbackToLegacy) {
+          return false;
+        }
+
+        throw modernResult.error;
+      };
+
+      const loadLegacyPermissions = async (): Promise<boolean> => {
+        const legacyResult = await supabase
+          .from('role_permissions')
+          .select('page_key, can_view, can_edit, can_delete')
+          .eq('role_id', roleId);
+
+        if (!legacyResult.error) {
+          applyLegacyRows((legacyResult.data || []) as LegacyPermissionRow[]);
+          return true;
+        }
+
+        const legacyMessage = legacyResult.error.message || '';
+        if (isMissingTableError(legacyResult.error, 'role_permissions')) {
+          setPermissionSchemaModeWithPreference('legacy');
+          setPermissions(buildPermissionState(roleName, getDefaultPermissionsForRole(roleName)));
+          return true;
+        }
+
+        const shouldFallbackToModern =
+          isMissingColumnError(legacyMessage, 'page_key') ||
+          isMissingColumnError(legacyMessage, 'can_view') ||
+          isMissingColumnError(legacyMessage, 'can_edit') ||
+          isMissingColumnError(legacyMessage, 'can_delete');
+
+        if (shouldFallbackToModern) {
+          return false;
+        }
+
+        throw legacyResult.error;
+      };
+
+      if (permissionSchemaMode === 'legacy') {
+        const loadedLegacy = await loadLegacyPermissions();
+        if (loadedLegacy) return;
+
+        const loadedModern = await loadModernPermissions();
+        if (loadedModern) return;
+      } else {
+        const loadedModern = await loadModernPermissions();
+        if (loadedModern) return;
+
+        const loadedLegacy = await loadLegacyPermissions();
+        if (loadedLegacy) return;
+      }
+
+      setPermissions(buildPermissionState(roleName, getDefaultPermissionsForRole(roleName)));
     } catch (err: unknown) {
       toast.error('Failed to load permissions: ' + getErrorMessage(err));
     }
-  }, []);
+  }, [permissionSchemaMode, setPermissionSchemaModeWithPreference]);
 
   useEffect(() => {
     if (!profile) {
@@ -633,6 +712,7 @@ export default function StaffRolesPage() {
         const { error: insertLegacyError } = await supabase.from('role_permissions').insert(legacyRows);
 
         if (insertLegacyError) throw insertLegacyError;
+        setPermissionSchemaModeWithPreference('legacy');
       } else {
         const rows = PERMISSION_DEFINITIONS.map((perm) => {
           const current = permissions[perm.key];
@@ -654,6 +734,7 @@ export default function StaffRolesPage() {
         const { error: insertModernError } = await supabase.from('role_permissions').insert(rows);
 
         if (insertModernError) throw insertModernError;
+        setPermissionSchemaModeWithPreference('modern');
       }
 
       await refreshProfile();
@@ -760,33 +841,14 @@ export default function StaffRolesPage() {
 
       let createdRole: Role;
 
-      if (roleSchemaMode === 'clinic_roles') {
-        try {
-          createdRole = await createRoleViaEdgeFunction();
-        } catch (edgeError: unknown) {
-          const edgeMessage = getErrorMessage(edgeError).toLowerCase();
-          const shouldFallbackToDirectInsert =
-            edgeMessage.includes('name, email, and password are required') ||
-            edgeMessage.includes('unknown action') ||
-            edgeMessage.includes('non-2xx') ||
-            edgeMessage.includes('bad request');
-
-          if (!shouldFallbackToDirectInsert) {
-            throw edgeError;
-          }
-
-          createdRole = await createRoleDirect();
+      try {
+        createdRole = await createRoleDirect();
+      } catch (directError: unknown) {
+        if (!isPermissionDeniedError(directError)) {
+          throw directError;
         }
-      } else {
-        try {
-          createdRole = await createRoleDirect();
-        } catch (directError: unknown) {
-          if (!isPermissionDeniedError(directError)) {
-            throw directError;
-          }
 
-          createdRole = await createRoleViaEdgeFunction();
-        }
+        createdRole = await createRoleViaEdgeFunction();
       }
 
       const nextRoles = sortRoles([...roles, createdRole]);

@@ -17,6 +17,7 @@ interface AuthContextType {
 
 const AuthContext = createContext<AuthContextType | undefined>(undefined);
 const ROLE_SCHEMA_PREFERENCE_KEY = 'clinic_management:role_schema_mode';
+const PERMISSION_SCHEMA_PREFERENCE_KEY = 'clinic_management:permission_schema_mode';
 
 const isMissingColumnError = (message: string, column: string) => {
   const msg = message.toLowerCase();
@@ -75,6 +76,22 @@ const storeRoleSchemaPreference = (mode: 'roles' | 'clinic_roles') => {
   window.localStorage.setItem(ROLE_SCHEMA_PREFERENCE_KEY, mode);
 };
 
+const getStoredPermissionSchemaPreference = (): 'modern' | 'legacy' => {
+  if (typeof window === 'undefined') return 'legacy';
+
+  const value = window.localStorage.getItem(PERMISSION_SCHEMA_PREFERENCE_KEY);
+  if (value === 'modern' || value === 'legacy') {
+    return value;
+  }
+
+  return getStoredRoleSchemaPreference() === 'clinic_roles' ? 'legacy' : 'modern';
+};
+
+const storePermissionSchemaPreference = (mode: 'modern' | 'legacy') => {
+  if (typeof window === 'undefined') return;
+  window.localStorage.setItem(PERMISSION_SCHEMA_PREFERENCE_KEY, mode);
+};
+
 type RawUserProfile = Omit<UserProfile, 'dynamic_role_id'> & {
   dynamic_role_id?: string | null;
   clinic_role_id?: string | null;
@@ -100,68 +117,45 @@ export function AuthProvider({ children }: { children: ReactNode }) {
   const [permissions, setPermissions] = useState<Record<string, boolean>>({});
   const [loading, setLoading] = useState(true);
   const roleSchemaPreferenceRef = useRef<'roles' | 'clinic_roles'>(getStoredRoleSchemaPreference());
+  const permissionSchemaPreferenceRef = useRef<'modern' | 'legacy'>(getStoredPermissionSchemaPreference());
   const setRoleSchemaPreference = useCallback((mode: 'roles' | 'clinic_roles') => {
     roleSchemaPreferenceRef.current = mode;
     storeRoleSchemaPreference(mode);
   }, []);
+  const setPermissionSchemaPreference = useCallback((mode: 'modern' | 'legacy') => {
+    permissionSchemaPreferenceRef.current = mode;
+    storePermissionSchemaPreference(mode);
+  }, []);
 
-  const fetchRolePermissions = useCallback(async (roleId: string): Promise<Record<string, boolean>> => {
-    try {
-      const modernResult = await supabase
-        .from('role_permissions')
-        .select('permission_key, can_read, can_write')
-        .eq('role_id', roleId);
-
-      if (!modernResult.error) {
-        const permMap: Record<string, boolean> = {};
-        const modernRows = (modernResult.data || []) as ModernPermissionRow[];
-
-        modernRows.forEach((row) => {
-          const enabled = Boolean(row.can_read || row.can_write);
-          const keys = resolvePermissionKeys(String(row.permission_key || ''));
-
-          if (!keys.length && row.permission_key) {
-            permMap[String(row.permission_key)] = enabled;
-            return;
-          }
-
-          keys.forEach((key) => {
-            permMap[key] = enabled;
-          });
-        });
-        return permMap;
-      }
-
-      const modernMessage = modernResult.error.message || '';
-      if (isMissingTableError(modernResult.error, 'role_permissions')) {
-        return {};
-      }
-
-      const shouldFallbackToLegacy =
-        isMissingColumnError(modernMessage, 'permission_key') ||
-        isMissingColumnError(modernMessage, 'can_read') ||
-        isMissingColumnError(modernMessage, 'can_write');
-
-      if (!shouldFallbackToLegacy) {
-        throw modernResult.error;
-      }
-
-      const legacyResult = await supabase
-        .from('role_permissions')
-        .select('page_key, can_view, can_edit, can_delete')
-        .eq('role_id', roleId);
-
-      if (legacyResult.error) {
-        if (isMissingTableError(legacyResult.error, 'role_permissions')) {
-          return {};
-        }
-        throw legacyResult.error;
-      }
-
+  const fetchRolePermissions = useCallback(async (
+    roleId: string,
+    roleName?: string,
+    clinicId?: string | null
+  ): Promise<Record<string, boolean>> => {
+    const mapModernRows = (rows: ModernPermissionRow[]) => {
       const permMap: Record<string, boolean> = {};
-      const legacyRows = (legacyResult.data || []) as LegacyPermissionRow[];
 
-      legacyRows.forEach((row) => {
+      rows.forEach((row) => {
+        const enabled = Boolean(row.can_read || row.can_write);
+        const keys = resolvePermissionKeys(String(row.permission_key || ''));
+
+        if (!keys.length && row.permission_key) {
+          permMap[String(row.permission_key)] = enabled;
+          return;
+        }
+
+        keys.forEach((key) => {
+          permMap[key] = enabled;
+        });
+      });
+
+      return permMap;
+    };
+
+    const mapLegacyRows = (rows: LegacyPermissionRow[]) => {
+      const permMap: Record<string, boolean> = {};
+
+      rows.forEach((row) => {
         const enabled = Boolean(row.can_view || row.can_edit || row.can_delete);
         const keys = resolvePermissionKeys(String(row.page_key || ''));
         keys.forEach((key) => {
@@ -170,11 +164,151 @@ export function AuthProvider({ children }: { children: ReactNode }) {
       });
 
       return permMap;
+    };
+
+    const fetchModernPermissions = async (): Promise<{ permMap: Record<string, boolean> | null; shouldFallback: boolean }> => {
+      const modernResult = await supabase
+        .from('role_permissions')
+        .select('permission_key, can_read, can_write')
+        .eq('role_id', roleId);
+
+      if (!modernResult.error) {
+        setPermissionSchemaPreference('modern');
+        return { permMap: mapModernRows((modernResult.data || []) as ModernPermissionRow[]), shouldFallback: false };
+      }
+
+      const modernMessage = modernResult.error.message || '';
+      if (isMissingTableError(modernResult.error, 'role_permissions')) {
+        setPermissionSchemaPreference('modern');
+        return { permMap: {}, shouldFallback: false };
+      }
+
+      const shouldFallbackToLegacy =
+        isMissingColumnError(modernMessage, 'permission_key') ||
+        isMissingColumnError(modernMessage, 'can_read') ||
+        isMissingColumnError(modernMessage, 'can_write');
+
+      if (shouldFallbackToLegacy) {
+        setPermissionSchemaPreference('legacy');
+        return { permMap: null, shouldFallback: true };
+      }
+
+      throw modernResult.error;
+    };
+
+    const fetchLegacyPermissionsByRoleId = async (
+      targetRoleId: string
+    ): Promise<{ permMap: Record<string, boolean> | null; shouldFallback: boolean }> => {
+      const legacyResult = await supabase
+        .from('role_permissions')
+        .select('page_key, can_view, can_edit, can_delete')
+        .eq('role_id', targetRoleId);
+
+      if (!legacyResult.error) {
+        setPermissionSchemaPreference('legacy');
+        return { permMap: mapLegacyRows((legacyResult.data || []) as LegacyPermissionRow[]), shouldFallback: false };
+      }
+
+      const legacyMessage = legacyResult.error.message || '';
+      if (isMissingTableError(legacyResult.error, 'role_permissions')) {
+        setPermissionSchemaPreference('legacy');
+        return { permMap: {}, shouldFallback: false };
+      }
+
+      const shouldFallbackToModern =
+        isMissingColumnError(legacyMessage, 'page_key') ||
+        isMissingColumnError(legacyMessage, 'can_view') ||
+        isMissingColumnError(legacyMessage, 'can_edit') ||
+        isMissingColumnError(legacyMessage, 'can_delete');
+
+      if (shouldFallbackToModern) {
+        setPermissionSchemaPreference('modern');
+        return { permMap: null, shouldFallback: true };
+      }
+
+      throw legacyResult.error;
+    };
+
+    const resolveLegacyRoleId = async (): Promise<string | null> => {
+      if (!roleName || !clinicId) return null;
+
+      const legacyRoleResult = await supabase
+        .from('clinic_roles')
+        .select('id')
+        .eq('role_name', roleName)
+        .eq('clinic_id', clinicId)
+        .maybeSingle();
+
+      if (legacyRoleResult.error) {
+        if (isMissingTableError({ ...legacyRoleResult.error, status: legacyRoleResult.status }, 'clinic_roles')) {
+          return null;
+        }
+        throw legacyRoleResult.error;
+      }
+
+      return legacyRoleResult.data?.id || null;
+    };
+
+    try {
+      if (permissionSchemaPreferenceRef.current === 'legacy') {
+        const legacyByCurrentRoleId = await fetchLegacyPermissionsByRoleId(roleId);
+
+        if (legacyByCurrentRoleId.permMap) {
+          if (Object.keys(legacyByCurrentRoleId.permMap).length > 0 || !roleName || !clinicId) {
+            return legacyByCurrentRoleId.permMap;
+          }
+
+          const legacyRoleId = await resolveLegacyRoleId();
+          if (legacyRoleId && legacyRoleId !== roleId) {
+            const legacyByResolvedRoleId = await fetchLegacyPermissionsByRoleId(legacyRoleId);
+            if (legacyByResolvedRoleId.permMap) {
+              return legacyByResolvedRoleId.permMap;
+            }
+          }
+
+          return legacyByCurrentRoleId.permMap;
+        }
+
+        if (legacyByCurrentRoleId.shouldFallback) {
+          const modern = await fetchModernPermissions();
+          if (modern.permMap) {
+            return modern.permMap;
+          }
+        }
+
+        return {};
+      }
+
+      const modern = await fetchModernPermissions();
+      if (modern.permMap) {
+        return modern.permMap;
+      }
+
+      if (modern.shouldFallback) {
+        const legacyByCurrentRoleId = await fetchLegacyPermissionsByRoleId(roleId);
+        if (legacyByCurrentRoleId.permMap) {
+          if (Object.keys(legacyByCurrentRoleId.permMap).length > 0 || !roleName || !clinicId) {
+            return legacyByCurrentRoleId.permMap;
+          }
+
+          const legacyRoleId = await resolveLegacyRoleId();
+          if (legacyRoleId && legacyRoleId !== roleId) {
+            const legacyByResolvedRoleId = await fetchLegacyPermissionsByRoleId(legacyRoleId);
+            if (legacyByResolvedRoleId.permMap) {
+              return legacyByResolvedRoleId.permMap;
+            }
+          }
+
+          return legacyByCurrentRoleId.permMap;
+        }
+      }
+
+      return {};
     } catch (error) {
       console.error('Error fetching role permissions:', error);
       return {};
     }
-  }, []);
+  }, [setPermissionSchemaPreference]);
 
   const resolveRoleIdForProfile = useCallback(async (profileData: RawUserProfile): Promise<string | null> => {
     if (profileData.dynamic_role_id) return profileData.dynamic_role_id;
@@ -292,7 +426,9 @@ export function AuthProvider({ children }: { children: ReactNode }) {
         setProfile(profileData as UserProfile);
 
         const roleId = await resolveRoleIdForProfile(profileData);
-        const permissionOverrides = roleId ? await fetchRolePermissions(roleId) : {};
+        const permissionOverrides = roleId
+          ? await fetchRolePermissions(roleId, profileData.role, profileData.clinic_id)
+          : {};
 
         setPermissions(mergePermissionsWithDefaults(profileData.role, permissionOverrides));
 

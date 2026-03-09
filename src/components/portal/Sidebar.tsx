@@ -42,7 +42,7 @@ export default function Sidebar() {
     navigate('/staff-login');
   };
 
-  const allowedItems = navItems.filter((item) => permissions[item.permissionKey] !== false);
+  const allowedItems = navItems.filter((item) => permissions[item.permissionKey] === true);
 
   const SidebarContent = ({ mobile = false }: { mobile?: boolean }) => (
     <div className={`flex flex-col h-full ${mobile ? '' : ''}`}>

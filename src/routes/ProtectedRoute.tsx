@@ -14,7 +14,11 @@ export default function ProtectedRoute({ children, allowedRoles, requiredPermiss
   const { user, profile, permissions, loading } = useAuth();
 
   const firstAllowedPath =
-    PERMISSION_DEFINITIONS.find((perm) => perm.sidebarPath && permissions[perm.key] !== false)?.sidebarPath || '/staff-login';
+    PERMISSION_DEFINITIONS.find((perm) => perm.sidebarPath && permissions[perm.key] === true)?.sidebarPath || '/portal';
+
+  const permissionsReady =
+    !requiredPermission ||
+    PERMISSION_DEFINITIONS.every((perm) => typeof permissions[perm.key] === 'boolean');
 
   if (loading && !user) {
     return (
@@ -51,6 +55,17 @@ export default function ProtectedRoute({ children, allowedRoles, requiredPermiss
     );
   }
 
+  if (requiredPermission && profile && !permissionsReady) {
+    return (
+      <div className="min-h-screen bg-gray-50 flex items-center justify-center">
+        <div className="text-center">
+          <LoadingSpinner size="lg" className="mx-auto mb-4" />
+          <p className="text-gray-500 text-sm">Loading permissions...</p>
+        </div>
+      </div>
+    );
+  }
+
   if (profile && profile.is_active === false) {
     return <Navigate to="/staff-login" replace />;
   }
@@ -59,7 +74,7 @@ export default function ProtectedRoute({ children, allowedRoles, requiredPermiss
     return <Navigate to="/portal" replace />;
   }
 
-  if (requiredPermission && permissions[requiredPermission] === false) {
+  if (requiredPermission && permissions[requiredPermission] !== true) {
     return <Navigate to={firstAllowedPath} replace />;
   }
 
