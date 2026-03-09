@@ -5,7 +5,7 @@ import { supabase } from '../../lib/supabase';
 import { Prescription, Patient, Medicine, PrescriptionMedicine } from '../../lib/types';
 import { useAuth } from '../../contexts/AuthContext';
 import { useToast } from '../../hooks/useToast';
-import { format } from 'date-fns';
+import { addDays, format } from 'date-fns';
 import Modal from '../../components/ui/Modal';
 import ConfirmDialog from '../../components/ui/ConfirmDialog';
 import MedicineRow from '../../components/portal/MedicineRow';
@@ -23,6 +23,32 @@ const emptyMed = (): PrescriptionMedicine => ({
   duration: '',
   special_instructions: '',
 });
+
+const getTodayIsoDate = () => format(new Date(), 'yyyy-MM-dd');
+
+const extractDurationDays = (duration: string) => {
+  const match = duration.trim().match(/^(\d+)\s*days?/i);
+  if (!match) return null;
+  const days = Number(match[1]);
+  return Number.isFinite(days) && days > 0 ? days : null;
+};
+
+const derivePrescriptionDatesFromMedicines = (medicines: PrescriptionMedicine[]) => {
+  const startDate = getTodayIsoDate();
+  const durationDays = medicines
+    .map((medicine) => extractDurationDays(medicine.duration))
+    .filter((days): days is number => days !== null);
+
+  if (durationDays.length === 0) {
+    return { startDate, endDate: '' };
+  }
+
+  const maxDays = Math.max(...durationDays);
+  return {
+    startDate,
+    endDate: format(addDays(new Date(startDate), maxDays), 'yyyy-MM-dd'),
+  };
+};
 
 function rxStatus(start_date: string | null, end_date: string | null) {
   const today = new Date(); today.setHours(0, 0, 0, 0);
@@ -64,15 +90,17 @@ export default function PrescriptionsPage() {
   const [savingType, setSavingType] = useState(false);
   const [newMedicineType, setNewMedicineType] = useState('');
 
-  const [form, setForm] = useState({
+  const buildInitialPrescriptionForm = () => ({
     patient_id: '',
     doctor_id: '',
     treatments: '',
     notes: '',
-    start_date: '',
+    start_date: getTodayIsoDate(),
     end_date: '',
     medicines: [emptyMed()],
   });
+
+  const [form, setForm] = useState(buildInitialPrescriptionForm);
 
   const fetchPrescriptions = useCallback(async () => {
     setLoading(true);
@@ -99,14 +127,24 @@ export default function PrescriptionsPage() {
     dQ.then(({ data }) => setDoctors(data || []));
   }, [profile]);
 
-  const addMedicineRow = () => setForm(f => ({ ...f, medicines: [...f.medicines, emptyMed()] }));
-  const removeMedicineRow = (i: number) => setForm(f => ({ ...f, medicines: f.medicines.filter((_, idx) => idx !== i) }));
+  const addMedicineRow = () => setForm(f => {
+    const medicines = [...f.medicines, emptyMed()];
+    const { startDate, endDate } = derivePrescriptionDatesFromMedicines(medicines);
+    return { ...f, medicines, start_date: startDate, end_date: endDate };
+  });
+
+  const removeMedicineRow = (i: number) => setForm(f => {
+    const medicines = f.medicines.filter((_, idx) => idx !== i);
+    const { startDate, endDate } = derivePrescriptionDatesFromMedicines(medicines);
+    return { ...f, medicines, start_date: startDate, end_date: endDate };
+  });
 
   const updateMedicine = (i: number, field: keyof PrescriptionMedicine, value: string) => {
     setForm(f => {
       const meds = [...f.medicines];
       meds[i] = { ...meds[i], [field]: value };
-      return { ...f, medicines: meds };
+      const { startDate, endDate } = derivePrescriptionDatesFromMedicines(meds);
+      return { ...f, medicines: meds, start_date: startDate, end_date: endDate };
     });
   };
 
@@ -122,7 +160,8 @@ export default function PrescriptionsPage() {
         duration: meds[i].duration || '',
         special_instructions: medicine.default_dosage || meds[i].special_instructions || '',
       };
-      return { ...f, medicines: meds };
+      const { startDate, endDate } = derivePrescriptionDatesFromMedicines(meds);
+      return { ...f, medicines: meds, start_date: startDate, end_date: endDate };
     });
   };
 
@@ -173,14 +212,14 @@ export default function PrescriptionsPage() {
       treatments: form.treatments,
       medicines: cleanedMeds,
       notes: form.notes,
-      start_date: form.start_date || null,
+      start_date: form.start_date || getTodayIsoDate(),
       end_date: form.end_date || null,
     });
     setSaving(false);
     if (error) { toast.error('Failed to save prescription.'); return; }
     toast.success('Prescription saved.');
     setShowForm(false);
-    setForm({ patient_id: '', doctor_id: '', treatments: '', notes: '', start_date: '', end_date: '', medicines: [emptyMed()] });
+    setForm(buildInitialPrescriptionForm());
     fetchPrescriptions();
   };
 
@@ -233,7 +272,13 @@ export default function PrescriptionsPage() {
           <Search className="absolute left-3 top-1/2 -translate-y-1/2 w-4 h-4 text-gray-400" />
           <input type="text" value={search} onChange={e => setSearch(e.target.value)} placeholder="Search prescriptions..." className="pl-9 pr-4 py-2.5 text-sm border border-gray-200 rounded-xl focus:outline-none focus:ring-2 focus:ring-sky-300 w-60 bg-white" />
         </div>
-        <button onClick={() => setShowForm(true)} className="flex items-center gap-2 px-4 py-2.5 bg-sky-600 text-white rounded-xl hover:bg-sky-700 transition-colors text-sm font-medium">
+        <button
+          onClick={() => {
+            setForm(buildInitialPrescriptionForm());
+            setShowForm(true);
+          }}
+          className="flex items-center gap-2 px-4 py-2.5 bg-sky-600 text-white rounded-xl hover:bg-sky-700 transition-colors text-sm font-medium"
+        >
           <Plus className="w-4 h-4" /> New Prescription
         </button>
       </div>
@@ -448,14 +493,17 @@ export default function PrescriptionsPage() {
 
           <div className="grid grid-cols-2 gap-4">
             <div>
-              <label className="block text-sm font-medium text-gray-700 mb-1.5">Start Date</label>
-              <input type="date" value={form.start_date} onChange={e => setForm({...form, start_date: e.target.value})} className="w-full px-3.5 py-2.5 border border-gray-200 rounded-xl focus:outline-none focus:ring-2 focus:ring-sky-300 text-sm" />
+              <label className="block text-sm font-medium text-gray-700 mb-1.5">Start Date (Auto)</label>
+              <input type="date" value={form.start_date} readOnly className="w-full px-3.5 py-2.5 border border-gray-200 rounded-xl text-sm bg-gray-50 text-gray-700 cursor-not-allowed" />
             </div>
             <div>
-              <label className="block text-sm font-medium text-gray-700 mb-1.5">End Date</label>
-              <input type="date" value={form.end_date} onChange={e => setForm({...form, end_date: e.target.value})} min={form.start_date || undefined} className="w-full px-3.5 py-2.5 border border-gray-200 rounded-xl focus:outline-none focus:ring-2 focus:ring-sky-300 text-sm" />
+              <label className="block text-sm font-medium text-gray-700 mb-1.5">End Date (Auto)</label>
+              <input type="date" value={form.end_date} readOnly className="w-full px-3.5 py-2.5 border border-gray-200 rounded-xl text-sm bg-gray-50 text-gray-700 cursor-not-allowed" />
             </div>
           </div>
+          <p className="text-xs text-gray-500 -mt-2">
+            Start date is always today. End date is calculated from selected medicine duration days.
+          </p>
 
           <div>
             <label className="block text-sm font-medium text-gray-700 mb-1.5">Notes</label>

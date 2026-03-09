@@ -120,12 +120,20 @@ export default function PrintDocument({ invoice, prescription, clinicName, clini
           <div className="mt-3 ml-auto w-60 space-y-1.5 text-sm">
             <div className="flex justify-between text-gray-600">
               <span>Subtotal</span>
-              <span>{formatPKR(invoice.total_amount - invoice.doctor_fee)}</span>
+              <span>{formatPKR(Math.max(0, invoice.total_amount + Number(invoice.discount_amount || 0) - invoice.doctor_fee))}</span>
             </div>
             {invoice.doctor_fee > 0 && (
               <div className="flex justify-between text-gray-600">
                 <span>Doctor Fee</span>
                 <span>{formatPKR(invoice.doctor_fee)}</span>
+              </div>
+            )}
+            {Number(invoice.discount_amount || 0) > 0 && (
+              <div className="flex justify-between text-emerald-700 font-medium">
+                <span>
+                  Discount {invoice.discount_type === 'percentage' ? `(${Number(invoice.discount_value || 0)}%)` : '(Rs)'}
+                </span>
+                <span>-{formatPKR(Number(invoice.discount_amount || 0))}</span>
               </div>
             )}
             <div className="flex justify-between font-bold text-base border-t-2 border-gray-900 pt-1.5">

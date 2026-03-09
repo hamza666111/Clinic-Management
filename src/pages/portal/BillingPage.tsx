@@ -24,6 +24,20 @@ const STATUS_LABELS: Record<string, string> = {
   unpaid: 'Unpaid', paid: 'Paid', partial: 'Partial', cancelled: 'Cancelled',
 };
 
+type DiscountType = 'amount' | 'percentage';
+
+const clamp = (value: number, min: number, max: number) => Math.min(Math.max(value, min), max);
+
+const isMissingDiscountColumnError = (errorLike: unknown) => {
+  if (!errorLike || typeof errorLike !== 'object') return false;
+
+  const error = errorLike as { code?: string; message?: string };
+  if (error.code === '42703') return true;
+  if (!error.message) return false;
+
+  return /discount_(type|value|amount)/i.test(error.message);
+};
+
 export default function BillingPage() {
   const { profile } = useAuth();
   const toast = useToast();
@@ -50,6 +64,8 @@ export default function BillingPage() {
     clinic_id: '',
     doctor_id: '',
     doctor_fee: '',
+    discount_type: 'amount' as DiscountType,
+    discount_value: '',
     amount_paid: '',
     status: 'unpaid' as Invoice['status'],
     items: [{ description: '', quantity: 1, unit_price: 0, total: 0 }] as InvoiceItem[],
@@ -211,13 +227,30 @@ export default function BillingPage() {
   };
 
   const subtotal = useMemo(() => form.items.reduce((a, item) => a + item.total, 0), [form.items]);
-  const totalAmount = useMemo(() => subtotal + Number(form.doctor_fee || 0), [subtotal, form.doctor_fee]);
+  const grossTotal = useMemo(() => subtotal + Number(form.doctor_fee || 0), [subtotal, form.doctor_fee]);
+  const discountValue = useMemo(() => Number(form.discount_value || 0), [form.discount_value]);
+
+  const discountAmount = useMemo(() => {
+    if (grossTotal <= 0 || discountValue <= 0) return 0;
+
+    if (form.discount_type === 'percentage') {
+      const percent = clamp(discountValue, 0, 100);
+      return (grossTotal * percent) / 100;
+    }
+
+    return clamp(discountValue, 0, grossTotal);
+  }, [discountValue, form.discount_type, grossTotal]);
+
+  const totalAmount = useMemo(
+    () => Math.max(0, grossTotal - discountAmount),
+    [discountAmount, grossTotal]
+  );
 
   const handleSave = async (e: React.FormEvent) => {
     e.preventDefault();
     if (!form.patient_id) { toast.error('Please select a patient.'); return; }
     setSaving(true);
-    const { data, error } = await supabase.from('invoices').insert({
+    const baseInvoicePayload = {
       patient_id: form.patient_id,
       clinic_id: form.clinic_id || null,
       doctor_id: (profile?.role === 'admin' || profile?.role === 'clinic_admin') ? (form.doctor_id || profile?.id) : profile?.id,
@@ -226,7 +259,29 @@ export default function BillingPage() {
       total_amount: totalAmount,
       amount_paid: form.status === 'partial' ? Number(form.amount_paid || 0) : form.status === 'paid' ? totalAmount : 0,
       status: form.status,
-    }).select('*, patient:patients(name, contact), doctor:users_profile!doctor_id(name), clinic:clinics(clinic_name, address, phone)').maybeSingle();
+    };
+
+    const payloadWithDiscount = {
+      ...baseInvoicePayload,
+      discount_type: form.discount_type,
+      discount_value: form.discount_type === 'percentage' ? clamp(discountValue, 0, 100) : clamp(discountValue, 0, grossTotal),
+      discount_amount: discountAmount,
+    };
+
+    let { data, error } = await supabase
+      .from('invoices')
+      .insert(payloadWithDiscount)
+      .select('*, patient:patients(name, contact), doctor:users_profile!doctor_id(name), clinic:clinics(clinic_name, address, phone)')
+      .maybeSingle();
+
+    if (error && isMissingDiscountColumnError(error)) {
+      ({ data, error } = await supabase
+        .from('invoices')
+        .insert(baseInvoicePayload)
+        .select('*, patient:patients(name, contact), doctor:users_profile!doctor_id(name), clinic:clinics(clinic_name, address, phone)')
+        .maybeSingle());
+    }
+
     setSaving(false);
     if (error || !data) { toast.error('Failed to save invoice.'); return; }
     toast.success('Invoice created.');
@@ -248,7 +303,7 @@ export default function BillingPage() {
     }
 
     setShowPrintOptions(true);
-    setForm({ patient_id: '', clinic_id: '', doctor_id: '', doctor_fee: '', amount_paid: '', status: 'unpaid', items: [{ description: '', quantity: 1, unit_price: 0, total: 0 }] });
+    setForm({ patient_id: '', clinic_id: '', doctor_id: '', doctor_fee: '', discount_type: 'amount', discount_value: '', amount_paid: '', status: 'unpaid', items: [{ description: '', quantity: 1, unit_price: 0, total: 0 }] });
     setSelectedPrescriptionId('');
     fetchInvoices();
   };
@@ -635,10 +690,37 @@ export default function BillingPage() {
             )}
           </div>
 
-          <div className="grid sm:grid-cols-2 gap-4">
+          <div className="grid sm:grid-cols-3 gap-4">
             <div>
               <label className="block text-sm font-medium text-gray-700 mb-1.5">Doctor Fee (PKR)</label>
               <input type="number" min="0" step="0.01" value={form.doctor_fee} onChange={e => setForm({...form, doctor_fee: e.target.value})} className="w-full px-3.5 py-2.5 border border-gray-200 rounded-xl focus:outline-none focus:ring-2 focus:ring-sky-300 text-sm" placeholder="0.00" />
+            </div>
+            <div>
+              <label className="block text-sm font-medium text-gray-700 mb-1.5">Discount</label>
+              <div className="grid grid-cols-3 gap-2">
+                <input
+                  type="number"
+                  min="0"
+                  step="0.01"
+                  value={form.discount_value}
+                  onChange={e => setForm({ ...form, discount_value: e.target.value })}
+                  className="col-span-2 px-3.5 py-2.5 border border-gray-200 rounded-xl focus:outline-none focus:ring-2 focus:ring-sky-300 text-sm"
+                  placeholder={form.discount_type === 'percentage' ? '0 - 100' : '0.00'}
+                />
+                <select
+                  value={form.discount_type}
+                  onChange={e => setForm({ ...form, discount_type: e.target.value as DiscountType })}
+                  className="px-2 py-2.5 border border-gray-200 rounded-xl focus:outline-none focus:ring-2 focus:ring-sky-300 text-sm bg-white"
+                >
+                  <option value="amount">Rs</option>
+                  <option value="percentage">%</option>
+                </select>
+              </div>
+              {discountAmount > 0 && (
+                <p className="text-xs text-emerald-600 mt-1.5">
+                  Applied discount: {formatPKR(discountAmount)}
+                </p>
+              )}
             </div>
             <div>
               <label className="block text-sm font-medium text-gray-700 mb-1.5">Status</label>
@@ -667,6 +749,14 @@ export default function BillingPage() {
           <div className="bg-gray-50 rounded-xl p-4 space-y-2">
             <div className="flex justify-between text-sm text-gray-600"><span>Subtotal</span><span>{formatPKR(subtotal)}</span></div>
             <div className="flex justify-between text-sm text-gray-600"><span>Doctor Fee</span><span>{formatPKR(Number(form.doctor_fee || 0))}</span></div>
+            {discountAmount > 0 && (
+              <div className="flex justify-between text-sm text-emerald-700">
+                <span>
+                  Discount {form.discount_type === 'percentage' ? `(${clamp(discountValue, 0, 100)}%)` : '(Rs)'}
+                </span>
+                <span>-{formatPKR(discountAmount)}</span>
+              </div>
+            )}
             <div className="flex justify-between font-bold text-gray-900 text-base border-t border-gray-200 pt-2 mt-2"><span>Total</span><span>{formatPKR(totalAmount)}</span></div>
             {form.status === 'partial' && Number(form.amount_paid) > 0 && (
               <>
@@ -817,8 +907,16 @@ export default function BillingPage() {
             )}
 
             <div className="bg-gray-50 rounded-xl p-4 space-y-2 text-sm">
-              <div className="flex justify-between text-gray-600"><span>Subtotal</span><span>{formatPKR(viewInvoice.total_amount - viewInvoice.doctor_fee)}</span></div>
+              <div className="flex justify-between text-gray-600"><span>Subtotal</span><span>{formatPKR(Math.max(0, viewInvoice.total_amount + Number(viewInvoice.discount_amount || 0) - viewInvoice.doctor_fee))}</span></div>
               <div className="flex justify-between text-gray-600"><span>Doctor Fee</span><span>{formatPKR(viewInvoice.doctor_fee)}</span></div>
+              {Number(viewInvoice.discount_amount || 0) > 0 && (
+                <div className="flex justify-between text-emerald-700 font-medium">
+                  <span>
+                    Discount {viewInvoice.discount_type === 'percentage' ? `(${Number(viewInvoice.discount_value || 0)}%)` : '(Rs)'}
+                  </span>
+                  <span>-{formatPKR(Number(viewInvoice.discount_amount || 0))}</span>
+                </div>
+              )}
               <div className="flex justify-between font-bold text-gray-900 text-base border-t border-gray-200 pt-2"><span>Total Amount</span><span>{formatPKR(viewInvoice.total_amount)}</span></div>
               {viewInvoice.status === 'partial' && (
                 <>

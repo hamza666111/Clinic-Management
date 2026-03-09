@@ -135,6 +135,9 @@ export interface Invoice {
   doctor_id: string | null;
   items: InvoiceItem[];
   doctor_fee: number;
+  discount_type?: 'amount' | 'percentage' | null;
+  discount_value?: number;
+  discount_amount?: number;
   total_amount: number;
   amount_paid: number;
   status: 'unpaid' | 'paid' | 'partial' | 'cancelled';

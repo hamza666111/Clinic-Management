@@ -56,6 +56,7 @@ const revenueData = [
 const appointmentsData = weekDays.map(d => ({ day: d.day, count: Math.floor(Math.random() * 8 + 2) }));
 
 const isGlobalAdmin = (role: string | undefined) => role === 'admin';
+const CLINIC_APPOINTMENT_ROLES = new Set(['doctor', 'assistant', 'receptionist', 'clinic_admin']);
 
 export default function DashboardPage() {
   const { profile, permissions } = useAuth();
@@ -78,14 +79,57 @@ export default function DashboardPage() {
       try {
         setLoading(true);
         const today = format(new Date(), 'yyyy-MM-dd');
-        const cid = !isGlobalAdmin(profile?.role) && profile?.clinic_id ? profile.clinic_id : null;
+        const role = profile?.role;
 
-      const pQ = cid ? supabase.from('patients').select('*', { count: 'exact', head: true }).eq('clinic_id', cid) : supabase.from('patients').select('*', { count: 'exact', head: true });
-      const aQ1 = cid ? supabase.from('appointments').select('*', { count: 'exact', head: true }).eq('appointment_date', today).eq('clinic_id', cid) : supabase.from('appointments').select('*', { count: 'exact', head: true }).eq('appointment_date', today);
-      const aQ2 = cid ? supabase.from('appointments').select('*', { count: 'exact', head: true }).gt('appointment_date', today).eq('status', 'scheduled').eq('clinic_id', cid) : supabase.from('appointments').select('*', { count: 'exact', head: true }).gt('appointment_date', today).eq('status', 'scheduled');
-      const iQ = cid ? supabase.from('invoices').select('total_amount, status').eq('clinic_id', cid) : supabase.from('invoices').select('total_amount, status');
-      const rpQ = cid ? supabase.from('patients').select('id, name, created_at, contact').eq('clinic_id', cid).order('created_at', { ascending: false }).limit(5) : supabase.from('patients').select('id, name, created_at, contact').order('created_at', { ascending: false }).limit(5);
-      const aQ3 = cid ? supabase.from('appointments').select('id, appointment_time, status, patient:patients(name)').eq('appointment_date', today).eq('clinic_id', cid).order('appointment_time') : supabase.from('appointments').select('id, appointment_time, status, patient:patients(name)').eq('appointment_date', today).order('appointment_time');
+        let cid = !isGlobalAdmin(role) ? (profile?.clinic_id || null) : null;
+        if (!cid && role && CLINIC_APPOINTMENT_ROLES.has(role) && profile?.id) {
+          const { data } = await supabase
+            .from('users_profile')
+            .select('clinic_id')
+            .eq('id', profile.id)
+            .maybeSingle();
+          cid = data?.clinic_id || null;
+        }
+
+      const pQ = cid
+        ? supabase.from('patients').select('*', { count: 'exact', head: true }).eq('clinic_id', cid)
+        : supabase.from('patients').select('*', { count: 'exact', head: true });
+
+      let aQ1 = supabase
+        .from('appointments')
+        .select('*', { count: 'exact', head: true })
+        .eq('appointment_date', today);
+
+      let aQ2 = supabase
+        .from('appointments')
+        .select('*', { count: 'exact', head: true })
+        .gt('appointment_date', today)
+        .in('status', ['scheduled', 'confirmed']);
+
+      let aQ3 = supabase
+        .from('appointments')
+        .select('id, appointment_time, status, patient:patients(name)')
+        .eq('appointment_date', today)
+        .order('appointment_time');
+
+      if (cid) {
+        aQ1 = aQ1.eq('clinic_id', cid);
+        aQ2 = aQ2.eq('clinic_id', cid);
+        aQ3 = aQ3.eq('clinic_id', cid);
+      } else if (role === 'doctor' && profile?.id) {
+        // Fallback when a doctor profile temporarily has no clinic_id synced.
+        aQ1 = aQ1.eq('doctor_id', profile.id);
+        aQ2 = aQ2.eq('doctor_id', profile.id);
+        aQ3 = aQ3.eq('doctor_id', profile.id);
+      }
+
+      const iQ = cid
+        ? supabase.from('invoices').select('total_amount, status').eq('clinic_id', cid)
+        : supabase.from('invoices').select('total_amount, status');
+
+      const rpQ = cid
+        ? supabase.from('patients').select('id, name, created_at, contact').eq('clinic_id', cid).order('created_at', { ascending: false }).limit(5)
+        : supabase.from('patients').select('id, name, created_at, contact').order('created_at', { ascending: false }).limit(5);
 
       const [
         { count: pCount },
