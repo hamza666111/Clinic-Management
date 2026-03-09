@@ -2,6 +2,11 @@ import { useState, useEffect } from 'react';
 import { supabase } from '../lib/supabase';
 import { DentalService, ClinicServicePrice } from '../lib/types';
 
+const serviceNameCollator = new Intl.Collator(undefined, {
+  sensitivity: 'base',
+  numeric: true,
+});
+
 export interface ServiceWithEffectivePrice extends DentalService {
   effective_price: number;
 }
@@ -38,7 +43,7 @@ export function useServices(clinicId?: string | null) {
     return { ...s, effective_price: override ? override.price : s.default_price };
   });
 
-  const serviceNames = services.map(s => s.service_name);
+  const serviceNames = [...services.map(s => s.service_name)].sort(serviceNameCollator.compare);
 
   const byCategory = servicesWithPrice.reduce<Record<string, ServiceWithEffectivePrice[]>>((acc, s) => {
     if (!acc[s.category]) acc[s.category] = [];

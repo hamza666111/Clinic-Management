@@ -75,20 +75,7 @@ export interface DentalService {
   created_at: string;
 }
 
-export type MedicineType =
-  | 'Tablet'
-  | 'Capsule'
-  | 'Syrup'
-  | 'Suspension'
-  | 'Mouthwash'
-  | 'Gel'
-  | 'Cream'
-  | 'Drops'
-  | 'Injection'
-  | 'Powder'
-  | 'Spray'
-  | 'Ointment'
-  | 'Other';
+export type MedicineType = string;
 
 export interface Medicine {
   id: string;

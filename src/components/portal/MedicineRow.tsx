@@ -1,21 +1,12 @@
 import { X, ChevronDown } from 'lucide-react';
-import { PrescriptionMedicine, Medicine, MedicineType } from '../../lib/types';
+import { PrescriptionMedicine, Medicine } from '../../lib/types';
 
-export const MEDICINE_TYPES: MedicineType[] = [
-  'Tablet',
-  'Capsule',
-  'Syrup',
-  'Suspension',
-  'Mouthwash',
-  'Gel',
-  'Cream',
-  'Drops',
-  'Injection',
-  'Powder',
-  'Spray',
-  'Ointment',
-  'Other',
-];
+const optionCollator = new Intl.Collator(undefined, {
+  sensitivity: 'base',
+  numeric: true,
+});
+
+const sortOptions = (options: string[]) => [...options].sort(optionCollator.compare);
 
 export const DOSE_QUANTITY_PRESETS: Record<string, string[]> = {
   Tablet: ['1 tablet', '2 tablets', 'Half tablet'],
@@ -76,6 +67,7 @@ interface Props {
   index: number;
   med: PrescriptionMedicine;
   medicines: Medicine[];
+  medicineTypes: string[];
   showRemove: boolean;
   onChange: (field: keyof PrescriptionMedicine, value: string) => void;
   onRemove: () => void;
@@ -100,6 +92,7 @@ function SelectField({
   onCustomChange?: (v: string) => void;
 }) {
   const isCustom = allowCustom && value === '__custom__';
+  const sortedOptions = sortOptions(options);
 
   return (
     <div className="relative">
@@ -115,7 +108,7 @@ function SelectField({
         className="w-full appearance-none px-3 py-2 pr-8 border border-gray-200 rounded-lg text-sm focus:outline-none focus:ring-2 focus:ring-sky-300 bg-white text-gray-800"
       >
         <option value="">{placeholder}</option>
-        {options.map(o => <option key={o} value={o}>{o}</option>)}
+        {sortedOptions.map(o => <option key={o} value={o}>{o}</option>)}
         {allowCustom && <option value="__custom__">Custom...</option>}
       </select>
       <ChevronDown className="pointer-events-none absolute right-2.5 top-1/2 -translate-y-1/2 w-3.5 h-3.5 text-gray-400" />
@@ -137,6 +130,7 @@ export default function MedicineRow({
   index,
   med,
   medicines,
+  medicineTypes,
   showRemove,
   onChange,
   onRemove,
@@ -156,6 +150,14 @@ export default function MedicineRow({
 
   const isDurationCustom = med.duration === '__custom__';
   const isInstructionCustom = med.special_instructions === '__custom__';
+
+  const sortedMedicines = [...medicines].sort((a, b) => {
+    const aLabel = `${a.medicine_name} ${a.strength} ${a.medicine_type}`.trim();
+    const bLabel = `${b.medicine_name} ${b.strength} ${b.medicine_type}`.trim();
+    return optionCollator.compare(aLabel, bLabel);
+  });
+
+  const sortedMedicineTypes = sortOptions(medicineTypes);
 
   return (
     <div className="bg-gray-50 border border-gray-200 rounded-2xl p-4 space-y-3">
@@ -198,7 +200,7 @@ export default function MedicineRow({
                 className="w-full appearance-none px-3 py-2 pr-8 border border-gray-200 rounded-lg text-sm focus:outline-none focus:ring-2 focus:ring-sky-300 bg-white"
               >
                 <option value="">Select medicine...</option>
-                {medicines.map(m => (
+                {sortedMedicines.map(m => (
                   <option key={m.id} value={m.id}>
                     {`${m.medicine_name} (${m.strength}) - ${m.medicine_type}`}
                   </option>
@@ -233,7 +235,7 @@ export default function MedicineRow({
               className="w-full appearance-none px-3 py-2 pr-8 border border-gray-200 rounded-lg text-sm focus:outline-none focus:ring-2 focus:ring-sky-300 bg-white"
             >
               <option value="">Select type...</option>
-              {MEDICINE_TYPES.map(t => <option key={t} value={t}>{t}</option>)}
+              {sortedMedicineTypes.map(t => <option key={t} value={t}>{t}</option>)}
             </select>
             <ChevronDown className="pointer-events-none absolute right-2.5 top-1/2 -translate-y-1/2 w-3.5 h-3.5 text-gray-400" />
           </div>

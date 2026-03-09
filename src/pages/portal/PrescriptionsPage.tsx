@@ -10,6 +10,7 @@ import Modal from '../../components/ui/Modal';
 import ConfirmDialog from '../../components/ui/ConfirmDialog';
 import MedicineRow from '../../components/portal/MedicineRow';
 import { useServices } from '../../hooks/useServices';
+import { useMedicineTypes } from '../../hooks/useMedicineTypes';
 import { printDocument, downloadAsPDF } from '../../lib/printUtils';
 import PrintDocument from '../../components/portal/PrintDocument';
 
@@ -50,12 +51,18 @@ export default function PrescriptionsPage() {
   const [search, setSearch] = useState('');
   const [patients, setPatients] = useState<Patient[]>([]);
   const [medicines, setMedicines] = useState<Medicine[]>([]);
+  const { medicineTypes, addMedicineType } = useMedicineTypes(
+    medicines.map((medicine) => medicine.medicine_type)
+  );
   const [doctors, setDoctors] = useState<{ id: string; name: string }[]>([]);
 
   const [showForm, setShowForm] = useState(false);
+  const [showAddType, setShowAddType] = useState(false);
   const [viewPrescription, setViewPrescription] = useState<Prescription | null>(null);
   const [deletePrescription, setDeletePrescription] = useState<Prescription | null>(null);
   const [saving, setSaving] = useState(false);
+  const [savingType, setSavingType] = useState(false);
+  const [newMedicineType, setNewMedicineType] = useState('');
 
   const [form, setForm] = useState({
     patient_id: '',
@@ -183,6 +190,40 @@ export default function PrescriptionsPage() {
     toast.success('Prescription deleted.');
     setDeletePrescription(null);
     fetchPrescriptions();
+  };
+
+  const handleAddType = async () => {
+    setSavingType(true);
+    const result = await addMedicineType(newMedicineType, profile?.id || null);
+    setSavingType(false);
+
+    if (!result.ok) {
+      if (result.reason === 'empty') {
+        toast.error('Medicine type is required.');
+        return;
+      }
+
+      if (result.reason === 'exists') {
+        toast.error('Medicine type already exists.');
+        return;
+      }
+
+      toast.error('Failed to add medicine type.');
+      return;
+    }
+
+    const addedType = result.type || newMedicineType.trim();
+    setForm((prev) => ({
+      ...prev,
+      medicines: prev.medicines.map((medicine, index) =>
+        index === prev.medicines.length - 1 && !medicine.medicine_type
+          ? { ...medicine, medicine_type: addedType }
+          : medicine
+      ),
+    }));
+    setNewMedicineType('');
+    setShowAddType(false);
+    toast.success('Medicine type added.');
   };
 
   return (
@@ -327,9 +368,22 @@ export default function PrescriptionsPage() {
           <div>
             <div className="flex items-center justify-between mb-3">
               <label className="block text-sm font-medium text-gray-700">Medicines</label>
-              <button type="button" onClick={addMedicineRow} className="flex items-center gap-1.5 text-sky-600 text-sm hover:text-sky-700 transition-colors font-medium">
-                <PlusCircle className="w-4 h-4" /> Add Medicine
-              </button>
+              <div className="flex items-center gap-3">
+                <button
+                  type="button"
+                  onClick={() => setShowAddType(true)}
+                  className="flex items-center gap-1.5 text-sky-600 text-sm hover:text-sky-700 transition-colors font-medium"
+                >
+                  <Plus className="w-4 h-4" /> Add Type
+                </button>
+                <button
+                  type="button"
+                  onClick={addMedicineRow}
+                  className="flex items-center gap-1.5 text-sky-600 text-sm hover:text-sky-700 transition-colors font-medium"
+                >
+                  <PlusCircle className="w-4 h-4" /> Add Medicine
+                </button>
+              </div>
             </div>
             <div className="space-y-3">
               {form.medicines.map((med, i) => (
@@ -338,6 +392,7 @@ export default function PrescriptionsPage() {
                   index={i}
                   med={med}
                   medicines={medicines}
+                  medicineTypes={medicineTypes}
                   showRemove={form.medicines.length > 1}
                   onChange={(field, value) => {
                     if (field === 'medicine_name') {
@@ -352,6 +407,44 @@ export default function PrescriptionsPage() {
               ))}
             </div>
           </div>
+
+          <Modal
+            isOpen={showAddType}
+            onClose={() => setShowAddType(false)}
+            title="Add Medicine Type"
+            size="md"
+          >
+            <div className="space-y-4">
+              <div>
+                <label className="block text-sm font-medium text-gray-700 mb-1.5">Type Name *</label>
+                <input
+                  required
+                  value={newMedicineType}
+                  onChange={(e) => setNewMedicineType(e.target.value)}
+                  placeholder="e.g., Lozenge"
+                  className="w-full px-3.5 py-2.5 border border-gray-200 rounded-xl focus:outline-none focus:ring-2 focus:ring-sky-300 text-sm"
+                />
+              </div>
+              <div className="flex gap-3 justify-end pt-2 border-t border-gray-100">
+                <button
+                  type="button"
+                  onClick={() => setShowAddType(false)}
+                  className="px-4 py-2.5 text-gray-700 bg-gray-100 hover:bg-gray-200 rounded-xl transition-colors text-sm"
+                >
+                  Cancel
+                </button>
+                <button
+                  type="button"
+                  onClick={() => { void handleAddType(); }}
+                  disabled={savingType}
+                  className="px-6 py-2.5 bg-sky-600 text-white rounded-xl hover:bg-sky-700 transition-colors text-sm font-medium disabled:opacity-60 flex items-center gap-2"
+                >
+                  {savingType && <div className="w-4 h-4 border-2 border-white/30 border-t-white rounded-full animate-spin" />}
+                  Add Type
+                </button>
+              </div>
+            </div>
+          </Modal>
 
           <div className="grid grid-cols-2 gap-4">
             <div>

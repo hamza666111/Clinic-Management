@@ -1,28 +1,13 @@
 import { useState, useEffect } from 'react';
 import { motion } from 'framer-motion';
-import { Plus, Search, Trash2, Pill, Edit2, Filter } from 'lucide-react';
+import { Plus, Search, Trash2, Pill, Edit2, PlusCircle } from 'lucide-react';
 import { supabase } from '../../lib/supabase';
-import { Medicine, MedicineType } from '../../lib/types';
+import { Medicine } from '../../lib/types';
 import { useAuth } from '../../contexts/AuthContext';
 import { useToast } from '../../hooks/useToast';
+import { useMedicineTypes } from '../../hooks/useMedicineTypes';
 import Modal from '../../components/ui/Modal';
 import ConfirmDialog from '../../components/ui/ConfirmDialog';
-
-const MEDICINE_TYPES: MedicineType[] = [
-  'Tablet',
-  'Capsule',
-  'Syrup',
-  'Suspension',
-  'Mouthwash',
-  'Gel',
-  'Cream',
-  'Drops',
-  'Injection',
-  'Powder',
-  'Spray',
-  'Ointment',
-  'Other',
-];
 
 const TYPE_COLORS: Record<string, string> = {
   Tablet: 'bg-blue-50 text-blue-600',
@@ -40,22 +25,35 @@ const TYPE_COLORS: Record<string, string> = {
   Other: 'bg-gray-50 text-gray-600',
 };
 
+const getDefaultMedicineType = (types: string[]) =>
+  types.find((type) => type.toLowerCase() === 'tablet') || types[0] || 'Tablet';
+
 export default function MedicinesPage() {
   const toast = useToast();
   const { session, profile } = useAuth();
   const [medicines, setMedicines] = useState<Medicine[]>([]);
+  const { medicineTypes, addMedicineType } = useMedicineTypes(
+    medicines.map((medicine) => medicine.medicine_type)
+  );
+
+  const availableMedicineTypes = medicineTypes.length > 0 ? medicineTypes : ['Tablet'];
+  const defaultMedicineType = getDefaultMedicineType(availableMedicineTypes);
+
   const [loading, setLoading] = useState(true);
   const [search, setSearch] = useState('');
   const [filterType, setFilterType] = useState('');
   const [showCreate, setShowCreate] = useState(false);
   const [showEdit, setShowEdit] = useState(false);
+  const [showAddType, setShowAddType] = useState(false);
   const [editMed, setEditMed] = useState<Medicine | null>(null);
   const [deleteMed, setDeleteMed] = useState<Medicine | null>(null);
   const [saving, setSaving] = useState(false);
+  const [savingType, setSavingType] = useState(false);
+  const [newMedicineType, setNewMedicineType] = useState('');
 
   const [createForm, setCreateForm] = useState({
     medicine_name: '',
-    medicine_type: 'Tablet' as MedicineType,
+    medicine_type: 'Tablet',
     strength: '',
     form: '',
     default_dosage: '',
@@ -63,7 +61,7 @@ export default function MedicinesPage() {
 
   const [editForm, setEditForm] = useState({
     medicine_name: '',
-    medicine_type: 'Tablet' as MedicineType,
+    medicine_type: 'Tablet',
     strength: '',
     form: '',
     default_dosage: '',
@@ -104,7 +102,7 @@ export default function MedicinesPage() {
     setShowCreate(false);
     setCreateForm({
       medicine_name: '',
-      medicine_type: 'Tablet',
+      medicine_type: defaultMedicineType,
       strength: '',
       form: '',
       default_dosage: '',
@@ -156,6 +154,34 @@ export default function MedicinesPage() {
     fetchMeds();
   };
 
+  const handleAddType = async (e: React.FormEvent) => {
+    e.preventDefault();
+    setSavingType(true);
+    const result = await addMedicineType(newMedicineType, session?.user?.id || null);
+    setSavingType(false);
+
+    if (!result.ok) {
+      if (result.reason === 'empty') {
+        toast.error('Medicine type is required.');
+        return;
+      }
+
+      if (result.reason === 'exists') {
+        toast.error('Medicine type already exists.');
+        return;
+      }
+
+      toast.error('Failed to add medicine type.');
+      return;
+    }
+
+    const addedType = result.type || newMedicineType.trim();
+    toast.success('Medicine type added.');
+    setCreateForm((prev) => ({ ...prev, medicine_type: addedType }));
+    setNewMedicineType('');
+    setShowAddType(false);
+  };
+
   return (
     <div className="p-6 space-y-6">
       <div className="flex flex-wrap items-center gap-3 justify-between">
@@ -176,7 +202,7 @@ export default function MedicinesPage() {
             className="px-3 py-2.5 text-sm border border-gray-200 rounded-xl focus:outline-none focus:ring-2 focus:ring-sky-300 bg-white"
           >
             <option value="">All Types</option>
-            {MEDICINE_TYPES.map((type) => (
+            {availableMedicineTypes.map((type) => (
               <option key={type} value={type}>
                 {type}
               </option>
@@ -184,22 +210,70 @@ export default function MedicinesPage() {
           </select>
           <span className="text-sm text-gray-500 px-2">{medicines.length} medicines</span>
         </div>
-        <button
-          onClick={() => {
-            setCreateForm({
-              medicine_name: '',
-              medicine_type: 'Tablet',
-              strength: '',
-              form: '',
-              default_dosage: '',
-            });
-            setShowCreate(true);
-          }}
-          className="flex items-center gap-2 px-4 py-2.5 bg-sky-600 text-white rounded-xl hover:bg-sky-700 transition-colors text-sm font-medium shadow-sm"
-        >
-          <Plus className="w-4 h-4" /> Add Medicine
-        </button>
+        <div className="flex items-center gap-2">
+          <button
+            onClick={() => setShowAddType(true)}
+            className="flex items-center gap-2 px-4 py-2.5 bg-white text-sky-700 border border-sky-200 rounded-xl hover:bg-sky-50 transition-colors text-sm font-medium shadow-sm"
+          >
+            <PlusCircle className="w-4 h-4" /> Add Type
+          </button>
+          <button
+            onClick={() => {
+              setCreateForm({
+                medicine_name: '',
+                medicine_type: defaultMedicineType,
+                strength: '',
+                form: '',
+                default_dosage: '',
+              });
+              setShowCreate(true);
+            }}
+            className="flex items-center gap-2 px-4 py-2.5 bg-sky-600 text-white rounded-xl hover:bg-sky-700 transition-colors text-sm font-medium shadow-sm"
+          >
+            <Plus className="w-4 h-4" /> Add Medicine
+          </button>
+        </div>
       </div>
+
+      <Modal
+        isOpen={showAddType}
+        onClose={() => setShowAddType(false)}
+        title="Add Medicine Type"
+      >
+        <form onSubmit={handleAddType} className="space-y-4">
+          <div>
+            <label className="block text-sm font-medium text-gray-700 mb-1.5">
+              Type Name *
+            </label>
+            <input
+              required
+              value={newMedicineType}
+              onChange={(e) => setNewMedicineType(e.target.value)}
+              className="w-full px-3.5 py-2.5 border border-gray-200 rounded-xl focus:outline-none focus:ring-2 focus:ring-sky-300 text-sm"
+              placeholder="e.g., Lozenge"
+            />
+          </div>
+          <div className="flex gap-3 justify-end pt-2 border-t border-gray-100">
+            <button
+              type="button"
+              onClick={() => setShowAddType(false)}
+              className="px-4 py-2.5 text-gray-700 bg-gray-100 hover:bg-gray-200 rounded-xl text-sm"
+            >
+              Cancel
+            </button>
+            <button
+              type="submit"
+              disabled={savingType}
+              className="px-6 py-2.5 bg-sky-600 text-white rounded-xl hover:bg-sky-700 text-sm font-medium disabled:opacity-60 flex items-center gap-2"
+            >
+              {savingType && (
+                <div className="w-4 h-4 border-2 border-white/30 border-t-white rounded-full animate-spin" />
+              )}
+              Add Type
+            </button>
+          </div>
+        </form>
+      </Modal>
 
       <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4 gap-4">
         {loading ? (
@@ -308,12 +382,12 @@ export default function MedicinesPage() {
                 onChange={(e) =>
                   setCreateForm({
                     ...createForm,
-                    medicine_type: e.target.value as MedicineType,
+                    medicine_type: e.target.value,
                   })
                 }
                 className="w-full px-3.5 py-2.5 border border-gray-200 rounded-xl focus:outline-none focus:ring-2 focus:ring-sky-300 text-sm"
               >
-                {MEDICINE_TYPES.map((type) => (
+                {availableMedicineTypes.map((type) => (
                   <option key={type} value={type}>
                     {type}
                   </option>
@@ -410,12 +484,12 @@ export default function MedicinesPage() {
                 onChange={(e) =>
                   setEditForm({
                     ...editForm,
-                    medicine_type: e.target.value as MedicineType,
+                    medicine_type: e.target.value,
                   })
                 }
                 className="w-full px-3.5 py-2.5 border border-gray-200 rounded-xl focus:outline-none focus:ring-2 focus:ring-sky-300 text-sm"
               >
-                {MEDICINE_TYPES.map((type) => (
+                {availableMedicineTypes.map((type) => (
                   <option key={type} value={type}>
                     {type}
                   </option>
