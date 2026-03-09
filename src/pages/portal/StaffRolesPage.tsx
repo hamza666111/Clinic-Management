@@ -1,4 +1,4 @@
-import { useState, useEffect } from 'react';
+import { useEffect, useMemo, useState } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { supabase } from '../../lib/supabase';
 import { useAuth } from '../../contexts/AuthContext';
@@ -12,6 +12,11 @@ import {
   mergePermissionsWithDefaults,
   resolvePermissionKeys,
 } from '../../lib/portalPermissions';
+
+interface ClinicOption {
+  id: string;
+  clinic_name: string;
+}
 
 interface Role {
   id: string;
@@ -32,6 +37,7 @@ interface TeamMember {
   email: string;
   role: string;
   is_active: boolean;
+  clinic_id: string | null;
 }
 
 type StaffTab = 'team' | 'permissions';
@@ -57,10 +63,14 @@ const sortRoles = (roleList: Role[]) => {
     const aPriority = ROLE_PRIORITY.indexOf(a.name);
     const bPriority = ROLE_PRIORITY.indexOf(b.name);
 
-    if (aPriority !== -1 || bPriority !== -1) {
+    if (aPriority !== bPriority) {
       if (aPriority === -1) return 1;
       if (bPriority === -1) return -1;
       return aPriority - bPriority;
+    }
+
+    if (a.name === b.name && a.is_system_default !== b.is_system_default) {
+      return Number(a.is_system_default) - Number(b.is_system_default);
     }
 
     return a.name.localeCompare(b.name);
@@ -88,42 +98,97 @@ export default function StaffRolesPage() {
   const { profile, refreshProfile } = useAuth();
 
   const [activeTab, setActiveTab] = useState<StaffTab>('permissions');
+
+  const [clinics, setClinics] = useState<ClinicOption[]>([]);
+  const [selectedClinicId, setSelectedClinicId] = useState('');
+
   const [team, setTeam] = useState<TeamMember[]>([]);
   const [teamLoading, setTeamLoading] = useState(false);
+  const [selectedMember, setSelectedMember] = useState<TeamMember | null>(null);
 
   const [roles, setRoles] = useState<Role[]>([]);
   const [selectedRole, setSelectedRole] = useState<Role | null>(null);
-  const [permissions, setPermissions] = useState<Record<string, Permission>>({});
   const [roleSchemaMode, setRoleSchemaMode] = useState<RoleSchemaMode>('roles');
+  const [loadingRoles, setLoadingRoles] = useState(false);
+
+  const [permissions, setPermissions] = useState<Record<string, Permission>>({});
   const [permissionSchemaMode, setPermissionSchemaMode] = useState<PermissionSchemaMode>('modern');
-  const [loading, setLoading] = useState(true);
-  const [saving, setSaving] = useState(false);
+  const [savingPermissions, setSavingPermissions] = useState(false);
+  const [assigningRole, setAssigningRole] = useState(false);
+
   const [newRoleName, setNewRoleName] = useState('');
   const [isAddingRole, setIsAddingRole] = useState(false);
 
-  useEffect(() => {
-    if (profile) {
-      void fetchRoles();
-    }
-  }, [profile?.clinic_id]);
+  const hasMultipleClinics = clinics.length > 1;
 
-  useEffect(() => {
-    if (selectedRole && activeTab === 'permissions') {
-      void fetchPermissions(selectedRole.id, selectedRole.name);
-    }
-  }, [selectedRole?.id, activeTab]);
+  const effectiveClinicId = useMemo(() => {
+    if (!profile) return null;
+    if (profile.role === 'admin') return selectedClinicId || null;
+    return profile.clinic_id || null;
+  }, [profile?.role, profile?.clinic_id, selectedClinicId]);
 
-  useEffect(() => {
-    if (profile && activeTab === 'team') {
-      void fetchTeam();
+  const selectedClinicName = useMemo(() => {
+    if (!selectedClinicId) return 'All Clinics';
+    return clinics.find((c) => c.id === selectedClinicId)?.clinic_name || 'Selected Clinic';
+  }, [clinics, selectedClinicId]);
+
+  const findRoleByName = (roleName?: string | null) => {
+    if (!roleName) return null;
+    const normalizedRole = roleName.trim().toLowerCase();
+
+    return (
+      roles.find((role) => role.name === normalizedRole && role.clinic_id === effectiveClinicId) ||
+      roles.find((role) => role.name === normalizedRole && !role.is_system_default) ||
+      roles.find((role) => role.name === normalizedRole && role.is_system_default) ||
+      roles.find((role) => role.name === normalizedRole) ||
+      null
+    );
+  };
+
+  const fetchClinics = async () => {
+    if (!profile) return;
+
+    try {
+      let query = supabase.from('clinics').select('id, clinic_name').order('clinic_name');
+
+      if (profile.role !== 'admin' && profile.clinic_id) {
+        query = query.eq('id', profile.clinic_id);
+      }
+
+      const { data, error } = await query;
+      if (error) throw error;
+
+      const clinicRows = (data || []) as ClinicOption[];
+      setClinics(clinicRows);
+
+      setSelectedClinicId((prev) => {
+        if (profile.role !== 'admin') {
+          return profile.clinic_id || clinicRows[0]?.id || '';
+        }
+
+        if (prev && clinicRows.some((clinic) => clinic.id === prev)) {
+          return prev;
+        }
+
+        return clinicRows[0]?.id || '';
+      });
+    } catch (err: any) {
+      if (profile.clinic_id) {
+        setClinics([{ id: profile.clinic_id, clinic_name: 'My Clinic' }]);
+        setSelectedClinicId(profile.clinic_id);
+      }
+      toast.error('Failed to load clinics: ' + err.message);
     }
-  }, [activeTab, profile?.clinic_id, profile?.role]);
+  };
 
   const fetchRoles = async () => {
+    if (!profile) return;
+
     try {
-      setLoading(true);
-      const roleFilter = profile?.clinic_id
-        ? `clinic_id.eq.${profile.clinic_id},is_system_default.eq.true`
+      setLoadingRoles(true);
+
+      const roleFilter = effectiveClinicId
+        ? `clinic_id.eq.${effectiveClinicId},is_system_default.eq.true`
         : 'is_system_default.eq.true';
 
       let normalizedRoles: Role[] = [];
@@ -140,16 +205,17 @@ export default function StaffRolesPage() {
           throw modernResult.error;
         }
 
-        const legacyFilter = profile?.clinic_id
-          ? `clinic_id.eq.${profile.clinic_id},is_default.eq.true`
-          : 'is_default.eq.true';
-
-        const legacyResult = await supabase
+        let legacyQuery = supabase
           .from('clinic_roles')
           .select('id, role_name, is_default, clinic_id')
-          .or(legacyFilter)
           .order('is_default', { ascending: false })
           .order('role_name');
+
+        if (effectiveClinicId) {
+          legacyQuery = legacyQuery.eq('clinic_id', effectiveClinicId);
+        }
+
+        const legacyResult = await legacyQuery;
 
         if (legacyResult.error) throw legacyResult.error;
 
@@ -167,35 +233,45 @@ export default function StaffRolesPage() {
 
       const sortedRoles = sortRoles(normalizedRoles);
       setRoles(sortedRoles);
+
       setSelectedRole((prev) => {
         if (!sortedRoles.length) return null;
         if (!prev) return sortedRoles[0];
-        return sortedRoles.find((r) => r.id === prev.id) || sortedRoles[0];
+        return sortedRoles.find((role) => role.id === prev.id) || prev || sortedRoles[0];
       });
     } catch (err: any) {
       toast.error('Failed to load roles: ' + err.message);
     } finally {
-      setLoading(false);
+      setLoadingRoles(false);
     }
   };
 
   const fetchTeam = async () => {
+    if (!profile) return;
+
     try {
       setTeamLoading(true);
 
       let query = supabase
         .from('users_profile')
-        .select('id, name, email, role, is_active')
+        .select('id, name, email, role, is_active, clinic_id')
         .order('created_at', { ascending: false });
 
-      if (profile?.role !== 'admin' && profile?.clinic_id) {
-        query = query.eq('clinic_id', profile.clinic_id);
+      if (effectiveClinicId) {
+        query = query.eq('clinic_id', effectiveClinicId);
       }
 
       const { data, error } = await query;
       if (error) throw error;
 
-      setTeam((data || []) as TeamMember[]);
+      const members = (data || []) as TeamMember[];
+      setTeam(members);
+
+      setSelectedMember((prev) => {
+        if (!members.length) return null;
+        if (!prev) return members[0];
+        return members.find((member) => member.id === prev.id) || members[0];
+      });
     } catch (err: any) {
       toast.error('Failed to load team: ' + err.message);
     } finally {
@@ -233,6 +309,7 @@ export default function StaffRolesPage() {
 
       const modernMessage = modernResult.error.message || '';
       if (isMissingTableError(modernMessage, 'role_permissions')) {
+        setPermissionSchemaMode('modern');
         setPermissions(buildPermissionState(roleName, getDefaultPermissionsForRole(roleName)));
         return;
       }
@@ -269,22 +346,67 @@ export default function StaffRolesPage() {
     }
   };
 
+  useEffect(() => {
+    if (profile) {
+      void fetchClinics();
+    }
+  }, [profile?.id, profile?.role, profile?.clinic_id]);
+
+  useEffect(() => {
+    if (!profile) return;
+    if (profile.role === 'admin' && hasMultipleClinics && !selectedClinicId) return;
+
+    void fetchTeam();
+    void fetchRoles();
+  }, [profile?.id, profile?.role, profile?.clinic_id, selectedClinicId, hasMultipleClinics]);
+
+  useEffect(() => {
+    if (activeTab !== 'permissions') return;
+
+    if (!selectedMember) {
+      setSelectedRole(null);
+      setPermissions({});
+      return;
+    }
+
+    const matchedRole = findRoleByName(selectedMember.role);
+    setSelectedRole(matchedRole);
+
+    if (!matchedRole) {
+      setPermissionSchemaMode('modern');
+      setPermissions(buildPermissionState(selectedMember.role, getDefaultPermissionsForRole(selectedMember.role)));
+    }
+  }, [activeTab, selectedMember?.id, selectedMember?.role, roles, effectiveClinicId]);
+
+  useEffect(() => {
+    if (activeTab === 'permissions' && selectedRole) {
+      void fetchPermissions(selectedRole.id, selectedRole.name);
+    }
+  }, [activeTab, selectedRole?.id]);
+
   const togglePermission = (key: PermissionKey) => {
     setPermissions((prev) => {
       const current = prev[key] || { permission_key: key, can_read: false, can_write: false };
       const nextState = !current.can_read;
       return {
         ...prev,
-        [key]: { ...current, can_read: nextState, can_write: nextState },
+        [key]: {
+          ...current,
+          can_read: nextState,
+          can_write: nextState,
+        },
       };
     });
   };
 
   const savePermissions = async () => {
-    if (!selectedRole) return;
+    if (!selectedRole) {
+      toast.error('Select a role before saving permissions');
+      return;
+    }
 
     try {
-      setSaving(true);
+      setSavingPermissions(true);
 
       if (permissionSchemaMode === 'legacy') {
         const legacyRows = PERMISSION_DEFINITIONS.map((perm) => {
@@ -341,12 +463,58 @@ export default function StaffRolesPage() {
     } catch (err: any) {
       toast.error('Failed to save permissions: ' + err.message);
     } finally {
-      setSaving(false);
+      setSavingPermissions(false);
+    }
+  };
+
+  const handleAssignRoleToMember = async () => {
+    if (!selectedMember || !selectedRole) {
+      toast.error('Select a team member and a role first');
+      return;
+    }
+
+    try {
+      setAssigningRole(true);
+
+      const { error } = await supabase.functions.invoke('create-user', {
+        body: {
+          action: 'update_profile',
+          user_id: selectedMember.id,
+          role: selectedRole.name,
+          clinic_id: selectedMember.clinic_id ?? effectiveClinicId ?? null,
+        },
+      });
+
+      if (error) throw new Error(error.message || 'Failed to update team member role');
+
+      await fetchTeam();
+      await refreshProfile();
+      toast.success(`Updated ${selectedMember.name}'s role to ${normalizeRoleLabel(selectedRole.name)}`);
+    } catch (err: any) {
+      toast.error('Failed to update member role: ' + err.message);
+    } finally {
+      setAssigningRole(false);
     }
   };
 
   const handleAddRole = async () => {
-    if (!newRoleName.trim()) return;
+    const roleName = newRoleName.trim().toLowerCase();
+    if (!roleName) return;
+
+    if (roles.some((role) => role.name === roleName && (role.clinic_id === effectiveClinicId || role.is_system_default))) {
+      toast.error('This role already exists in the selected clinic');
+      return;
+    }
+
+    if (profile?.role === 'admin' && hasMultipleClinics && !effectiveClinicId) {
+      toast.error('Please select a clinic before adding a role');
+      return;
+    }
+
+    if (roleSchemaMode === 'clinic_roles' && !effectiveClinicId) {
+      toast.error('Please select a clinic before adding a role');
+      return;
+    }
 
     try {
       let createdRole: Role;
@@ -356,8 +524,8 @@ export default function StaffRolesPage() {
           .from('clinic_roles')
           .insert([
             {
-              role_name: newRoleName.trim().toLowerCase(),
-              clinic_id: profile?.clinic_id,
+              role_name: roleName,
+              clinic_id: effectiveClinicId,
               is_default: false,
             },
           ])
@@ -377,8 +545,8 @@ export default function StaffRolesPage() {
           .from('roles')
           .insert([
             {
-              name: newRoleName.trim().toLowerCase(),
-              clinic_id: profile?.clinic_id,
+              name: roleName,
+              clinic_id: effectiveClinicId,
               is_system_default: false,
             },
           ])
@@ -391,10 +559,9 @@ export default function StaffRolesPage() {
 
       const nextRoles = sortRoles([...roles, createdRole]);
       setRoles(nextRoles);
+      setSelectedRole(createdRole);
       setNewRoleName('');
       setIsAddingRole(false);
-      setSelectedRole(createdRole);
-      setActiveTab('permissions');
       toast.success('Role created successfully');
     } catch (err: any) {
       toast.error('Failed to create role: ' + err.message);
@@ -406,10 +573,10 @@ export default function StaffRolesPage() {
       <div className="flex flex-wrap justify-between items-center gap-4">
         <div>
           <h1 className="text-2xl font-bold text-gray-900">Staff & Roles</h1>
-          <p className="text-sm text-gray-500 mt-1">Manage team members and global page permissions</p>
+          <p className="text-sm text-gray-500 mt-1">Manage teams clinic-wise and control page permissions</p>
         </div>
 
-        <div className="flex items-center gap-3">
+        <div className="flex items-center gap-3 flex-wrap">
           <div className="bg-gray-100 p-1 rounded-lg flex text-sm font-medium">
             <button
               onClick={() => setActiveTab('team')}
@@ -429,6 +596,20 @@ export default function StaffRolesPage() {
             </button>
           </div>
 
+          {hasMultipleClinics && (
+            <select
+              value={selectedClinicId}
+              onChange={(e) => setSelectedClinicId(e.target.value)}
+              className="px-3 py-2 text-sm border border-gray-200 rounded-lg focus:ring-2 focus:ring-indigo-500 focus:border-indigo-500"
+            >
+              {clinics.map((clinic) => (
+                <option key={clinic.id} value={clinic.id}>
+                  {clinic.clinic_name}
+                </option>
+              ))}
+            </select>
+          )}
+
           <button
             onClick={() => navigate('/portal/users')}
             className="flex items-center gap-2 bg-indigo-600 text-white px-4 py-2 rounded-lg hover:bg-indigo-700 transition-colors"
@@ -443,7 +624,7 @@ export default function StaffRolesPage() {
         <div className="bg-white rounded-xl shadow-sm border border-gray-200 overflow-hidden">
           <div className="p-4 border-b border-gray-100 bg-gray-50 flex items-center justify-between">
             <h2 className="font-semibold text-gray-700 flex items-center gap-2">
-              <Users size={18} /> Team Members
+              <Users size={18} /> Team Members - {selectedClinicName}
             </h2>
             <span className="text-sm text-gray-500">{team.length} members</span>
           </div>
@@ -452,7 +633,7 @@ export default function StaffRolesPage() {
             {teamLoading ? (
               <p className="text-center text-sm text-gray-400 py-8">Loading team...</p>
             ) : team.length === 0 ? (
-              <p className="text-center text-sm text-gray-400 py-8">No team members found</p>
+              <p className="text-center text-sm text-gray-400 py-8">No team members found for this clinic</p>
             ) : (
               <div className="overflow-x-auto">
                 <table className="w-full text-sm">
@@ -488,129 +669,176 @@ export default function StaffRolesPage() {
           </div>
         </div>
       ) : (
-        <div className="flex gap-6 h-[calc(100vh-13rem)] min-h-[500px]">
-          <div className="w-72 bg-white rounded-xl shadow-sm border border-gray-200 flex flex-col overflow-hidden">
-            <div className="p-4 border-b border-gray-100 flex justify-between items-center bg-gray-50">
+        <div className="flex gap-6 h-[calc(100vh-13rem)] min-h-[520px]">
+          <div className="w-80 bg-white rounded-xl shadow-sm border border-gray-200 flex flex-col overflow-hidden">
+            <div className="p-4 border-b border-gray-100 bg-gray-50">
               <h2 className="font-semibold text-gray-700 flex items-center gap-2">
-                <ShieldCheck size={18} />
-                Roles
+                <Users size={18} /> Team of {selectedClinicName}
               </h2>
             </div>
 
             <div className="flex-1 overflow-y-auto p-3 space-y-1">
-              {loading ? (
-                <p className="text-center text-sm text-gray-400 py-4">Loading roles...</p>
+              {teamLoading ? (
+                <p className="text-center text-sm text-gray-400 py-4">Loading team...</p>
+              ) : team.length === 0 ? (
+                <p className="text-center text-sm text-gray-400 py-4">No team members in this clinic</p>
               ) : (
-                roles.map((role) => (
+                team.map((member) => (
                   <button
-                    key={role.id}
-                    onClick={() => setSelectedRole(role)}
-                    className={`w-full text-left px-4 py-3 rounded-lg text-sm font-medium transition-colors hover:bg-indigo-50 ${
-                      selectedRole?.id === role.id ? 'bg-indigo-50 text-indigo-700' : 'text-gray-700'
+                    key={member.id}
+                    onClick={() => setSelectedMember(member)}
+                    className={`w-full text-left px-4 py-3 rounded-lg text-sm transition-colors border ${
+                      selectedMember?.id === member.id
+                        ? 'bg-indigo-50 border-indigo-200 text-indigo-700'
+                        : 'bg-white border-transparent text-gray-700 hover:bg-gray-50'
                     }`}
                   >
-                    <div className="flex items-center justify-between gap-2">
-                      <span>{normalizeRoleLabel(role.name)}</span>
-                      {role.is_system_default && <Lock size={12} className="text-gray-400" />}
-                    </div>
+                    <p className="font-semibold truncate">{member.name}</p>
+                    <p className="text-xs text-gray-500 truncate">{member.email}</p>
+                    <p className="text-xs mt-1">{normalizeRoleLabel(member.role)}</p>
                   </button>
                 ))
-              )}
-
-              {isAddingRole ? (
-                <div className="pt-2 px-2 pb-2">
-                  <input
-                    type="text"
-                    autoFocus
-                    placeholder="Role name..."
-                    value={newRoleName}
-                    onChange={(e) => setNewRoleName(e.target.value)}
-                    onKeyDown={(e) => e.key === 'Enter' && void handleAddRole()}
-                    className="w-full text-sm border-gray-300 rounded-md focus:ring-indigo-500 focus:border-indigo-500 p-2 border"
-                  />
-                  <div className="flex gap-2 mt-2">
-                    <button
-                      onClick={() => void handleAddRole()}
-                      className="text-xs bg-indigo-600 text-white px-2 py-1 rounded"
-                    >
-                      Save
-                    </button>
-                    <button onClick={() => setIsAddingRole(false)} className="text-xs text-gray-500 px-2 py-1">
-                      Cancel
-                    </button>
-                  </div>
-                </div>
-              ) : (
-                <div className="pt-2">
-                  <button
-                    onClick={() => setIsAddingRole(true)}
-                    className="w-full flex items-center gap-2 text-sm text-indigo-600 hover:bg-indigo-50 px-4 py-2 rounded-lg font-medium transition-colors"
-                  >
-                    <Plus size={16} />
-                    Add New Role
-                  </button>
-                </div>
               )}
             </div>
           </div>
 
           <div className="flex-1 bg-white rounded-xl shadow-sm border border-gray-200 flex flex-col overflow-hidden">
-            {selectedRole ? (
+            {selectedMember ? (
               <>
-                <div className="p-6 border-b border-gray-100 flex justify-between items-center">
-                  <h2 className="text-xl font-bold text-gray-900 flex items-center gap-3">
-                    Permissions for: {normalizeRoleLabel(selectedRole.name)}
-                    {selectedRole.is_system_default && (
-                      <span className="text-xs font-normal bg-gray-100 text-gray-500 px-2 py-1 rounded-full flex items-center gap-1">
-                        <Lock size={10} /> System Default
-                      </span>
-                    )}
-                  </h2>
-                  <button
-                    onClick={() => void savePermissions()}
-                    disabled={saving}
-                    className="bg-indigo-600 text-white px-6 py-2 rounded-lg hover:bg-indigo-700 font-medium transition-colors disabled:opacity-50"
-                  >
-                    {saving ? 'Saving...' : 'Save Changes'}
-                  </button>
+                <div className="p-6 border-b border-gray-100 space-y-4">
+                  <div className="flex flex-wrap items-start justify-between gap-4">
+                    <div>
+                      <h2 className="text-xl font-bold text-gray-900">Permissions for: {selectedMember.name}</h2>
+                      <p className="text-sm text-gray-500 mt-1">Toggle access to dashboard and all portal pages</p>
+                    </div>
+
+                    <button
+                      onClick={() => void savePermissions()}
+                      disabled={savingPermissions || !selectedRole}
+                      className="bg-indigo-600 text-white px-6 py-2 rounded-lg hover:bg-indigo-700 font-medium transition-colors disabled:opacity-50"
+                    >
+                      {savingPermissions ? 'Saving...' : 'Save Permissions'}
+                    </button>
+                  </div>
+
+                  <div className="flex flex-wrap items-center gap-3">
+                    <div className="min-w-[240px]">
+                      <label className="block text-xs font-semibold text-gray-500 mb-1">Existing Roles</label>
+                      <select
+                        value={selectedRole?.id || ''}
+                        onChange={(e) => {
+                          const role = roles.find((item) => item.id === e.target.value) || null;
+                          setSelectedRole(role);
+                        }}
+                        className="w-full px-3 py-2 text-sm border border-gray-200 rounded-lg focus:ring-2 focus:ring-indigo-500 focus:border-indigo-500"
+                      >
+                        <option value="">Select role</option>
+                        {roles.map((role) => (
+                          <option key={role.id} value={role.id}>
+                            {normalizeRoleLabel(role.name)}{role.is_system_default ? ' (System)' : ''}
+                          </option>
+                        ))}
+                      </select>
+                    </div>
+
+                    <button
+                      onClick={() => void handleAssignRoleToMember()}
+                      disabled={assigningRole || !selectedRole}
+                      className="mt-5 bg-slate-900 text-white px-4 py-2 rounded-lg hover:bg-slate-800 text-sm disabled:opacity-50"
+                    >
+                      {assigningRole ? 'Updating Role...' : 'Assign Role To Member'}
+                    </button>
+
+                    <button
+                      onClick={() => setIsAddingRole((prev) => !prev)}
+                      className="mt-5 flex items-center gap-2 bg-indigo-100 text-indigo-700 px-4 py-2 rounded-lg hover:bg-indigo-200 text-sm"
+                    >
+                      <Plus size={16} /> Add Role
+                    </button>
+                  </div>
+
+                  {isAddingRole && (
+                    <div className="flex flex-wrap items-center gap-2">
+                      <input
+                        type="text"
+                        value={newRoleName}
+                        onChange={(e) => setNewRoleName(e.target.value)}
+                        onKeyDown={(e) => e.key === 'Enter' && void handleAddRole()}
+                        placeholder="e.g. senior_assistant"
+                        className="px-3 py-2 text-sm border border-gray-200 rounded-lg min-w-[240px] focus:ring-2 focus:ring-indigo-500 focus:border-indigo-500"
+                      />
+                      <button
+                        onClick={() => void handleAddRole()}
+                        className="bg-indigo-600 text-white px-4 py-2 rounded-lg hover:bg-indigo-700 text-sm"
+                      >
+                        Save Role
+                      </button>
+                      <button
+                        onClick={() => {
+                          setIsAddingRole(false);
+                          setNewRoleName('');
+                        }}
+                        className="px-4 py-2 text-sm text-gray-600 hover:text-gray-900"
+                      >
+                        Cancel
+                      </button>
+                    </div>
+                  )}
                 </div>
 
                 <div className="flex-1 overflow-y-auto p-6">
-                  <div className="space-y-4 max-w-3xl">
-                    {PERMISSION_DEFINITIONS.map((perm) => {
-                      const isActive = permissions[perm.key]?.can_read || false;
-                      return (
-                        <div
-                          key={perm.key}
-                          className="flex items-center justify-between pb-4 border-b border-gray-50 last:border-0 hover:bg-gray-50 p-2 rounded-lg transition-colors"
-                        >
-                          <div>
-                            <h3 className="font-semibold text-gray-800">{perm.label}</h3>
-                            <p className="text-sm text-gray-500">{perm.desc}</p>
-                          </div>
+                  {loadingRoles ? (
+                    <p className="text-center text-sm text-gray-400 py-10">Loading roles...</p>
+                  ) : !selectedRole ? (
+                    <p className="text-center text-sm text-gray-400 py-10">Select a role to view permissions</p>
+                  ) : (
+                    <div className="space-y-4 max-w-3xl">
+                      <div className="flex items-center gap-3 pb-2">
+                        <h3 className="font-semibold text-gray-900">Role: {normalizeRoleLabel(selectedRole.name)}</h3>
+                        {selectedRole.is_system_default && (
+                          <span className="text-xs font-normal bg-gray-100 text-gray-500 px-2 py-1 rounded-full flex items-center gap-1">
+                            <Lock size={10} /> System Default
+                          </span>
+                        )}
+                      </div>
 
-                          <button
-                            role="switch"
-                            aria-checked={isActive}
-                            onClick={() => togglePermission(perm.key)}
-                            className={`relative inline-flex h-6 w-11 items-center rounded-full transition-colors focus:outline-none focus:ring-2 focus:ring-indigo-500 focus:ring-offset-2 ${
-                              isActive ? 'bg-indigo-600' : 'bg-gray-200'
-                            }`}
+                      {PERMISSION_DEFINITIONS.map((perm) => {
+                        const isActive = permissions[perm.key]?.can_read || false;
+                        return (
+                          <div
+                            key={perm.key}
+                            className="flex items-center justify-between pb-4 border-b border-gray-50 last:border-0 hover:bg-gray-50 p-2 rounded-lg transition-colors"
                           >
-                            <span
-                              className={`inline-block h-4 w-4 transform rounded-full bg-white transition-transform ${
-                                isActive ? 'translate-x-6' : 'translate-x-1'
+                            <div>
+                              <h4 className="font-semibold text-gray-800">{perm.label}</h4>
+                              <p className="text-sm text-gray-500">{perm.desc}</p>
+                            </div>
+
+                            <button
+                              role="switch"
+                              aria-checked={isActive}
+                              onClick={() => togglePermission(perm.key)}
+                              className={`relative inline-flex h-6 w-11 items-center rounded-full transition-colors focus:outline-none focus:ring-2 focus:ring-indigo-500 focus:ring-offset-2 ${
+                                isActive ? 'bg-indigo-600' : 'bg-gray-200'
                               }`}
-                            />
-                          </button>
-                        </div>
-                      );
-                    })}
-                  </div>
+                            >
+                              <span
+                                className={`inline-block h-4 w-4 transform rounded-full bg-white transition-transform ${
+                                  isActive ? 'translate-x-6' : 'translate-x-1'
+                                }`}
+                              />
+                            </button>
+                          </div>
+                        );
+                      })}
+                    </div>
+                  )}
                 </div>
               </>
             ) : (
-              <div className="flex-1 flex items-center justify-center text-gray-400">Select a role to view permissions</div>
+              <div className="flex-1 flex items-center justify-center text-gray-400">
+                Select a team member to manage permissions
+              </div>
             )}
           </div>
         </div>
