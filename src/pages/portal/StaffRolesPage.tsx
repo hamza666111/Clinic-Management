@@ -2,7 +2,7 @@ import { useEffect, useMemo, useState } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { supabase } from '../../lib/supabase';
 import { useAuth } from '../../contexts/AuthContext';
-import { ShieldCheck, Plus, Lock, Users } from 'lucide-react';
+import { Plus, Lock, Users } from 'lucide-react';
 import toast from 'react-hot-toast';
 import {
   LEGACY_PERMISSION_KEY_MAP,
@@ -46,9 +46,40 @@ type PermissionSchemaMode = 'modern' | 'legacy';
 
 const ROLE_PRIORITY = ['admin', 'doctor', 'assistant', 'receptionist', 'clinic_admin'];
 
-const isMissingTableError = (message: string, table: string) => {
-  const msg = message.toLowerCase();
-  return msg.includes(`public.${table}`) || msg.includes(`relation "${table}"`) || msg.includes(`table '${table}'`);
+type SupabaseLikeError = {
+  message?: string;
+  details?: string;
+  hint?: string;
+  code?: string;
+  status?: number;
+  statusCode?: number;
+};
+
+const isMissingTableError = (errorLike: SupabaseLikeError | string | null | undefined, table: string) => {
+  if (!errorLike) return false;
+
+  const tableName = table.toLowerCase();
+  const buildMessage = (message: string) => {
+    const msg = message.toLowerCase();
+    return (
+      msg.includes(`public.${tableName}`) ||
+      msg.includes(`relation "${tableName}"`) ||
+      msg.includes(`table '${tableName}'`) ||
+      msg.includes(`table \"public.${tableName}\"`) ||
+      msg.includes(`could not find the table 'public.${tableName}'`) ||
+      (msg.includes('not found') && msg.includes(tableName))
+    );
+  };
+
+  if (typeof errorLike === 'string') {
+    return buildMessage(errorLike);
+  }
+
+  const status = errorLike.status ?? errorLike.statusCode;
+  const code = (errorLike.code || '').toUpperCase();
+  const message = [errorLike.message, errorLike.details, errorLike.hint].filter(Boolean).join(' ');
+
+  return status === 404 || code === '42P01' || code === 'PGRST205' || buildMessage(message);
 };
 
 const isMissingColumnError = (message: string, column: string) => {
@@ -193,18 +224,16 @@ export default function StaffRolesPage() {
 
       let normalizedRoles: Role[] = [];
 
-      const modernResult = await supabase
-        .from('roles')
-        .select('id, name, is_system_default, clinic_id')
-        .or(roleFilter)
-        .order('is_system_default', { ascending: false })
-        .order('name');
+      const fetchModernRoles = async () => {
+        return supabase
+          .from('roles')
+          .select('id, name, is_system_default, clinic_id')
+          .or(roleFilter)
+          .order('is_system_default', { ascending: false })
+          .order('name');
+      };
 
-      if (modernResult.error) {
-        if (!isMissingTableError(modernResult.error.message || '', 'roles')) {
-          throw modernResult.error;
-        }
-
+      const fetchLegacyRoles = async () => {
         let legacyQuery = supabase
           .from('clinic_roles')
           .select('id, role_name, is_default, clinic_id')
@@ -215,20 +244,53 @@ export default function StaffRolesPage() {
           legacyQuery = legacyQuery.eq('clinic_id', effectiveClinicId);
         }
 
-        const legacyResult = await legacyQuery;
+        return legacyQuery;
+      };
 
-        if (legacyResult.error) throw legacyResult.error;
+      if (roleSchemaMode === 'clinic_roles') {
+        const legacyResult = await fetchLegacyRoles();
 
-        setRoleSchemaMode('clinic_roles');
-        normalizedRoles = (legacyResult.data || []).map((row: any) => ({
-          id: row.id,
-          name: row.role_name,
-          is_system_default: Boolean(row.is_default),
-          clinic_id: row.clinic_id,
-        }));
+        if (legacyResult.error) {
+          if (!isMissingTableError({ ...legacyResult.error, status: legacyResult.status }, 'clinic_roles')) {
+            throw legacyResult.error;
+          }
+
+          const modernResult = await fetchModernRoles();
+          if (modernResult.error) throw modernResult.error;
+
+          setRoleSchemaMode('roles');
+          normalizedRoles = (modernResult.data || []) as Role[];
+        } else {
+          setRoleSchemaMode('clinic_roles');
+          normalizedRoles = (legacyResult.data || []).map((row: any) => ({
+            id: row.id,
+            name: row.role_name,
+            is_system_default: Boolean(row.is_default),
+            clinic_id: row.clinic_id,
+          }));
+        }
       } else {
-        setRoleSchemaMode('roles');
-        normalizedRoles = (modernResult.data || []) as Role[];
+        const modernResult = await fetchModernRoles();
+
+        if (modernResult.error) {
+          if (!isMissingTableError({ ...modernResult.error, status: modernResult.status }, 'roles')) {
+            throw modernResult.error;
+          }
+
+          const legacyResult = await fetchLegacyRoles();
+          if (legacyResult.error) throw legacyResult.error;
+
+          setRoleSchemaMode('clinic_roles');
+          normalizedRoles = (legacyResult.data || []).map((row: any) => ({
+            id: row.id,
+            name: row.role_name,
+            is_system_default: Boolean(row.is_default),
+            clinic_id: row.clinic_id,
+          }));
+        } else {
+          setRoleSchemaMode('roles');
+          normalizedRoles = (modernResult.data || []) as Role[];
+        }
       }
 
       const sortedRoles = sortRoles(normalizedRoles);
@@ -308,7 +370,7 @@ export default function StaffRolesPage() {
       }
 
       const modernMessage = modernResult.error.message || '';
-      if (isMissingTableError(modernMessage, 'role_permissions')) {
+      if (isMissingTableError(modernResult.error, 'role_permissions')) {
         setPermissionSchemaMode('modern');
         setPermissions(buildPermissionState(roleName, getDefaultPermissionsForRole(roleName)));
         return;

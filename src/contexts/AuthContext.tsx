@@ -1,4 +1,4 @@
-import { createContext, useContext, useEffect, useState, ReactNode, useCallback } from 'react';
+import { createContext, useContext, useEffect, useState, ReactNode, useCallback, useRef } from 'react';
 import { User, Session } from '@supabase/supabase-js';
 import { supabase } from '../lib/supabase';
 import { UserProfile } from '../lib/types';
@@ -22,9 +22,40 @@ const isMissingColumnError = (message: string, column: string) => {
   return msg.includes(column.toLowerCase()) && (msg.includes('column') || msg.includes('does not exist'));
 };
 
-const isMissingTableError = (message: string, table: string) => {
-  const msg = message.toLowerCase();
-  return msg.includes(`public.${table}`) || msg.includes(`relation "${table}"`) || msg.includes(`table '${table}'`);
+type SupabaseLikeError = {
+  message?: string;
+  details?: string;
+  hint?: string;
+  code?: string;
+  status?: number;
+  statusCode?: number;
+};
+
+const isMissingTableError = (errorLike: SupabaseLikeError | string | null | undefined, table: string) => {
+  if (!errorLike) return false;
+
+  const tableName = table.toLowerCase();
+  const buildMessage = (message: string) => {
+    const msg = message.toLowerCase();
+    return (
+      msg.includes(`public.${tableName}`) ||
+      msg.includes(`relation "${tableName}"`) ||
+      msg.includes(`table '${tableName}'`) ||
+      msg.includes(`table \"public.${tableName}\"`) ||
+      msg.includes(`could not find the table 'public.${tableName}'`) ||
+      (msg.includes('not found') && msg.includes(tableName))
+    );
+  };
+
+  if (typeof errorLike === 'string') {
+    return buildMessage(errorLike);
+  }
+
+  const status = errorLike.status ?? errorLike.statusCode;
+  const code = (errorLike.code || '').toUpperCase();
+  const message = [errorLike.message, errorLike.details, errorLike.hint].filter(Boolean).join(' ');
+
+  return status === 404 || code === '42P01' || code === 'PGRST205' || buildMessage(message);
 };
 
 type RawUserProfile = Omit<UserProfile, 'dynamic_role_id'> & {
@@ -38,6 +69,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
   const [profile, setProfile] = useState<UserProfile | null>(null);
   const [permissions, setPermissions] = useState<Record<string, boolean>>({});
   const [loading, setLoading] = useState(true);
+  const roleSchemaPreferenceRef = useRef<'roles' | 'clinic_roles'>('roles');
 
   const fetchRolePermissions = useCallback(async (roleId: string): Promise<Record<string, boolean>> => {
     try {
@@ -65,7 +97,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
       }
 
       const modernMessage = modernResult.error.message || '';
-      if (isMissingTableError(modernMessage, 'role_permissions')) {
+      if (isMissingTableError(modernResult.error, 'role_permissions')) {
         return {};
       }
 
@@ -85,7 +117,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
 
       if (legacyResult.error) {
         const legacyMessage = legacyResult.error.message || '';
-        if (isMissingTableError(legacyMessage, 'role_permissions')) {
+        if (isMissingTableError(legacyResult.error, 'role_permissions')) {
           return {};
         }
         throw legacyResult.error;
@@ -112,38 +144,85 @@ export function AuthProvider({ children }: { children: ReactNode }) {
     if (profileData.clinic_role_id) return profileData.clinic_role_id;
 
     try {
-      if (profileData.clinic_id) {
-        const clinicRoleResult = await supabase
+      const resolveFromModernRoles = async (): Promise<{ id: string | null; missingTable: boolean }> => {
+        if (profileData.clinic_id) {
+          const clinicRoleResult = await supabase
+            .from('roles')
+            .select('id')
+            .eq('name', profileData.role)
+            .eq('clinic_id', profileData.clinic_id)
+            .maybeSingle();
+
+          if (!clinicRoleResult.error && clinicRoleResult.data?.id) {
+            return { id: clinicRoleResult.data.id, missingTable: false };
+          }
+
+          if (clinicRoleResult.error) {
+            if (isMissingTableError({ ...clinicRoleResult.error, status: clinicRoleResult.status }, 'roles')) {
+              return { id: null, missingTable: true };
+            }
+            console.error('Error looking up clinic role:', clinicRoleResult.error);
+          }
+        }
+
+        const systemRoleResult = await supabase
           .from('roles')
           .select('id')
           .eq('name', profileData.role)
+          .eq('is_system_default', true)
+          .maybeSingle();
+
+        if (systemRoleResult.error) {
+          if (isMissingTableError({ ...systemRoleResult.error, status: systemRoleResult.status }, 'roles')) {
+            return { id: null, missingTable: true };
+          }
+          console.error('Error looking up system role:', systemRoleResult.error);
+          return { id: null, missingTable: false };
+        }
+
+        return { id: systemRoleResult.data?.id || null, missingTable: false };
+      };
+
+      const resolveFromLegacyRoles = async (): Promise<{ id: string | null; missingTable: boolean }> => {
+        if (!profileData.clinic_id) {
+          return { id: null, missingTable: false };
+        }
+
+        const legacyRoleResult = await supabase
+          .from('clinic_roles')
+          .select('id')
+          .eq('role_name', profileData.role)
           .eq('clinic_id', profileData.clinic_id)
           .maybeSingle();
 
-        if (!clinicRoleResult.error && clinicRoleResult.data?.id) {
-          return clinicRoleResult.data.id;
+        if (legacyRoleResult.error) {
+          if (isMissingTableError({ ...legacyRoleResult.error, status: legacyRoleResult.status }, 'clinic_roles')) {
+            return { id: null, missingTable: true };
+          }
+          console.error('Error looking up legacy clinic role:', legacyRoleResult.error);
+          return { id: null, missingTable: false };
         }
 
-        if (clinicRoleResult.error && !isMissingTableError(clinicRoleResult.error.message || '', 'roles')) {
-          console.error('Error looking up clinic role:', clinicRoleResult.error);
+        return { id: legacyRoleResult.data?.id || null, missingTable: false };
+      };
+
+      if (roleSchemaPreferenceRef.current === 'clinic_roles') {
+        const legacy = await resolveFromLegacyRoles();
+        if (!legacy.missingTable) {
+          return legacy.id;
         }
+        roleSchemaPreferenceRef.current = 'roles';
       }
 
-      const systemRoleResult = await supabase
-        .from('roles')
-        .select('id')
-        .eq('name', profileData.role)
-        .eq('is_system_default', true)
-        .maybeSingle();
-
-      if (systemRoleResult.error) {
-        if (!isMissingTableError(systemRoleResult.error.message || '', 'roles')) {
-          console.error('Error looking up system role:', systemRoleResult.error);
-        }
-        return null;
+      const modern = await resolveFromModernRoles();
+      if (!modern.missingTable) {
+        roleSchemaPreferenceRef.current = 'roles';
+        return modern.id;
       }
 
-      return systemRoleResult.data?.id || null;
+      roleSchemaPreferenceRef.current = 'clinic_roles';
+      const legacy = await resolveFromLegacyRoles();
+      return legacy.id;
     } catch (error) {
       console.error('Failed to resolve role id:', error);
       return null;
