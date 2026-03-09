@@ -9,22 +9,30 @@ import { useAuth } from '../../contexts/AuthContext';
 import { useToast } from '../../hooks/useToast';
 
 const navItems = [
-  { to: '/portal', label: 'Dashboard', icon: LayoutDashboard, roles: ['admin', 'clinic_admin', 'doctor', 'receptionist'], exact: true },
-  { to: '/portal/patients', label: 'Patients', icon: Users, roles: ['admin', 'clinic_admin', 'doctor', 'receptionist'] },
-  { to: '/portal/appointments', label: 'Appointments', icon: Calendar, roles: ['admin', 'clinic_admin', 'doctor', 'receptionist'] },
-  { to: '/portal/prescriptions', label: 'Prescriptions', icon: FileText, roles: ['admin', 'clinic_admin', 'doctor'] },
-  { to: '/portal/billing', label: 'Billing', icon: Receipt, roles: ['admin', 'clinic_admin', 'doctor', 'receptionist'] },
-  { to: '/portal/services', label: 'Services', icon: Stethoscope, roles: ['admin', 'clinic_admin', 'doctor', 'receptionist'] },
-  { to: '/portal/medicines', label: 'Medicines', icon: Pill, roles: ['admin', 'clinic_admin', 'doctor', 'receptionist'] },
-  { to: '/portal/users', label: 'Users', icon: UserCog, roles: ['admin', 'clinic_admin'] },
-  { to: '/portal/staff-roles', label: 'Staff Roles', icon: ShieldCheck, roles: ['admin', 'clinic_admin'] },
-  { to: '/portal/clinics', label: 'Clinics', icon: Building2, roles: ['admin'] },
+  { to: '/portal', label: 'Dashboard', icon: LayoutDashboard, permissionKey: 'view_dashboard', exact: true },
+  { to: '/portal/patients', label: 'Patients', icon: Users, permissionKey: 'manage_patients' },
+  { to: '/portal/appointments', label: 'Appointments', icon: Calendar, permissionKey: 'manage_appointments' },
+  { to: '/portal/prescriptions', label: 'Prescriptions', icon: FileText, permissionKey: 'manage_prescriptions' },
+  { to: '/portal/billing', label: 'Billing', icon: Receipt, permissionKey: 'manage_billing' },
+  { to: '/portal/services', label: 'Services', icon: Stethoscope, permissionKey: 'manage_services' },
+  { to: '/portal/medicines', label: 'Medicines', icon: Pill, permissionKey: 'manage_medicines' },
+  { to: '/portal/users', label: 'Users', icon: UserCog, permissionKey: 'manage_users' },
+  { to: '/portal/staff-roles', label: 'Staff Roles', icon: ShieldCheck, permissionKey: 'manage_staff_roles' },
+  { to: '/portal/clinics', label: 'Clinics', icon: Building2, permissionKey: 'manage_clinics' },
 ];
+
+const ROLE_LABELS: Record<string, string> = {
+  admin: 'Admin',
+  clinic_admin: 'Clinic Admin',
+  doctor: 'Doctor',
+  assistant: 'Assistant',
+  receptionist: 'Receptionist',
+};
 
 export default function Sidebar() {
   const [collapsed, setCollapsed] = useState(false);
   const [mobileOpen, setMobileOpen] = useState(false);
-  const { profile, signOut } = useAuth();
+  const { profile, permissions, signOut } = useAuth();
   const navigate = useNavigate();
   const toast = useToast();
 
@@ -34,7 +42,7 @@ export default function Sidebar() {
     navigate('/staff-login');
   };
 
-  const allowedItems = navItems.filter(item => item.roles.includes(profile?.role || ''));
+  const allowedItems = navItems.filter((item) => permissions[item.permissionKey] !== false);
 
   const SidebarContent = ({ mobile = false }: { mobile?: boolean }) => (
     <div className={`flex flex-col h-full ${mobile ? '' : ''}`}>
@@ -63,7 +71,7 @@ export default function Sidebar() {
             </div>
             <div className="min-w-0">
               <p className="font-semibold text-gray-900 text-sm truncate">{profile.name}</p>
-              <p className="text-xs text-sky-600 capitalize">{profile.role === 'clinic_admin' ? 'Clinic Admin' : profile.role}</p>
+              <p className="text-xs text-sky-600">{ROLE_LABELS[profile.role] || profile.role}</p>
             </div>
           </div>
         </div>

@@ -12,6 +12,7 @@ const ROLE_COLORS: Record<string, string> = {
   admin: 'bg-rose-100 text-rose-700',
   clinic_admin: 'bg-amber-100 text-amber-700',
   doctor: 'bg-sky-100 text-sky-700',
+  assistant: 'bg-violet-100 text-violet-700',
   receptionist: 'bg-emerald-100 text-emerald-700',
 };
 
@@ -19,11 +20,12 @@ const ROLE_LABELS: Record<string, string> = {
   admin: 'Admin',
   clinic_admin: 'Clinic Admin',
   doctor: 'Doctor',
+  assistant: 'Assistant',
   receptionist: 'Receptionist',
 };
 
-const ALL_ROLES = ['admin', 'clinic_admin', 'doctor', 'receptionist'] as const;
-const CLINIC_ROLES = ['clinic_admin', 'doctor', 'receptionist'] as const;
+const ALL_ROLES = ['admin', 'doctor', 'assistant', 'receptionist'] as const;
+const CLINIC_ROLES = ['doctor', 'assistant', 'receptionist'] as const;
 
 interface CreateFormData {
   name: string;
@@ -392,8 +394,8 @@ export default function UsersPage() {
                   <div className="flex-1">
                     <div className="flex items-center gap-3 mb-1">
                       <h3 className="font-semibold text-gray-900">{user.name}</h3>
-                      <span className={`px-2.5 py-0.5 rounded-full text-xs font-medium ${ROLE_COLORS[user.role]}`}>
-                        {ROLE_LABELS[user.role]}
+                      <span className={`px-2.5 py-0.5 rounded-full text-xs font-medium ${ROLE_COLORS[user.role] || 'bg-gray-100 text-gray-700'}`}>
+                        {ROLE_LABELS[user.role] || user.role}
                       </span>
                       {!user.is_active && (
                         <span className="px-2.5 py-0.5 rounded-full text-xs font-medium bg-gray-100 text-gray-600">

@@ -22,11 +22,58 @@ Deno.serve(async (req: Request) => {
   }
 
   try {
+    const ALLOWED_USER_ROLES = ["admin", "clinic_admin", "doctor", "assistant", "receptionist"];
+
+    const isMissingTableError = (message: string, table: string) => {
+      const msg = message.toLowerCase();
+      return msg.includes(`public.${table}`) || msg.includes(`relation "${table}"`) || msg.includes(`table '${table}'`);
+    };
+
     const supabaseAdmin = createClient(
       Deno.env.get("SUPABASE_URL")!,
       Deno.env.get("SUPABASE_SERVICE_ROLE_KEY")!,
       { auth: { autoRefreshToken: false, persistSession: false } }
     );
+
+    const resolveDynamicRoleId = async (roleName: string, clinicId?: string | null) => {
+      try {
+        if (clinicId) {
+          const clinicRoleRes = await supabaseAdmin
+            .from("roles")
+            .select("id")
+            .eq("name", roleName)
+            .eq("clinic_id", clinicId)
+            .maybeSingle();
+
+          if (!clinicRoleRes.error && clinicRoleRes.data?.id) {
+            return clinicRoleRes.data.id as string;
+          }
+
+          if (clinicRoleRes.error && !isMissingTableError(clinicRoleRes.error.message || "", "roles")) {
+            throw clinicRoleRes.error;
+          }
+        }
+
+        const systemRoleRes = await supabaseAdmin
+          .from("roles")
+          .select("id")
+          .eq("name", roleName)
+          .eq("is_system_default", true)
+          .maybeSingle();
+
+        if (systemRoleRes.error) {
+          if (isMissingTableError(systemRoleRes.error.message || "", "roles")) {
+            return null;
+          }
+          throw systemRoleRes.error;
+        }
+
+        return (systemRoleRes.data?.id as string | undefined) || null;
+      } catch (err) {
+        console.error("resolveDynamicRoleId failed:", err);
+        return null;
+      }
+    };
 
     const authHeader = req.headers.get("Authorization");
     if (!authHeader) {
@@ -143,11 +190,45 @@ Deno.serve(async (req: Request) => {
           headers: { ...corsHeaders, "Content-Type": "application/json" },
         });
       }
+
+      if (role !== undefined && !ALLOWED_USER_ROLES.includes(role)) {
+        return new Response(JSON.stringify({ error: "Invalid role selected." }), {
+          status: 400,
+          headers: { ...corsHeaders, "Content-Type": "application/json" },
+        });
+      }
+
+      if (callerProfile.role === "clinic_admin" && role === "admin") {
+        return new Response(JSON.stringify({ error: "Clinic admins cannot assign admin role." }), {
+          status: 403,
+          headers: { ...corsHeaders, "Content-Type": "application/json" },
+        });
+      }
+
       const updateData: Record<string, unknown> = {};
       if (name !== undefined) updateData.name = name;
       if (role !== undefined) updateData.role = role;
       if (clinic_id !== undefined) updateData.clinic_id = clinic_id;
       if (is_active !== undefined) updateData.is_active = is_active;
+
+      if (role !== undefined || clinic_id !== undefined) {
+        const { data: currentProfile, error: currentProfileError } = await supabaseAdmin
+          .from("users_profile")
+          .select("role, clinic_id")
+          .eq("id", user_id)
+          .maybeSingle();
+
+        if (currentProfileError) {
+          return new Response(JSON.stringify({ error: currentProfileError.message }), {
+            status: 400,
+            headers: { ...corsHeaders, "Content-Type": "application/json" },
+          });
+        }
+
+        const nextRole = (role as string | undefined) || currentProfile?.role || "receptionist";
+        const nextClinicId = clinic_id !== undefined ? clinic_id : currentProfile?.clinic_id || null;
+        updateData.dynamic_role_id = await resolveDynamicRoleId(nextRole, nextClinicId);
+      }
 
       const { error: profileError } = await supabaseAdmin
         .from("users_profile")
@@ -189,11 +270,29 @@ Deno.serve(async (req: Request) => {
       });
     }
 
+    const finalRole = role || "receptionist";
+
+    if (!ALLOWED_USER_ROLES.includes(finalRole)) {
+      return new Response(JSON.stringify({ error: "Invalid role selected." }), {
+        status: 400,
+        headers: { ...corsHeaders, "Content-Type": "application/json" },
+      });
+    }
+
+    if (callerProfile.role === "clinic_admin" && finalRole === "admin") {
+      return new Response(JSON.stringify({ error: "Clinic admins cannot assign admin role." }), {
+        status: 403,
+        headers: { ...corsHeaders, "Content-Type": "application/json" },
+      });
+    }
+
+    const dynamicRoleId = await resolveDynamicRoleId(finalRole, clinic_id || null);
+
     const { data, error } = await supabaseAdmin.auth.admin.createUser({
       email,
       password,
       email_confirm: true,
-      user_metadata: { name, role: role || "receptionist" },
+      user_metadata: { name, role: finalRole },
     });
 
     if (error) {
@@ -207,8 +306,9 @@ Deno.serve(async (req: Request) => {
       id: data.user.id,
       name,
       email,
-      role: role || "receptionist",
+      role: finalRole,
       clinic_id: clinic_id || null,
+      dynamic_role_id: dynamicRoleId,
       is_active: true,
     });
 

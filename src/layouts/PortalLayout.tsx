@@ -8,6 +8,7 @@ const PAGE_TITLES: Record<string, { title: string; subtitle: string }> = {
   '/portal/appointments': { title: 'Appointments', subtitle: 'Schedule and manage appointments' },
   '/portal/prescriptions': { title: 'Prescriptions', subtitle: 'Create and manage prescriptions' },
   '/portal/billing': { title: 'Billing & Invoices', subtitle: 'Manage invoices and payments' },
+  '/portal/services': { title: 'Services', subtitle: 'Manage service categories and prices' },
   '/portal/medicines': { title: 'Medicine Master List', subtitle: 'Manage the medicines database' },
   '/portal/users': { title: 'User Management', subtitle: 'Manage staff accounts and roles' },
   '/portal/staff-roles': { title: 'Staff & Roles', subtitle: 'Manage staff roles and access permissions' },

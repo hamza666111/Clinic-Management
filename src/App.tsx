@@ -96,13 +96,34 @@ export default function App() {
                 </ProtectedRoute>
               }
             >
-              <Route index element={<DashboardPage />} />
-              <Route path="patients" element={<PatientsPage />} />
-              <Route path="appointments" element={<AppointmentsPage />} />
+              <Route
+                index
+                element={
+                  <ProtectedRoute requiredPermission="view_dashboard">
+                    <DashboardPage />
+                  </ProtectedRoute>
+                }
+              />
+              <Route
+                path="patients"
+                element={
+                  <ProtectedRoute requiredPermission="manage_patients">
+                    <PatientsPage />
+                  </ProtectedRoute>
+                }
+              />
+              <Route
+                path="appointments"
+                element={
+                  <ProtectedRoute requiredPermission="manage_appointments">
+                    <AppointmentsPage />
+                  </ProtectedRoute>
+                }
+              />
               <Route
                 path="prescriptions"
                 element={
-                  <ProtectedRoute allowedRoles={['admin', 'doctor']}>
+                  <ProtectedRoute requiredPermission="manage_prescriptions">
                     <PrescriptionsPage />
                   </ProtectedRoute>
                 }
@@ -110,7 +131,7 @@ export default function App() {
               <Route
                 path="billing"
                 element={
-                  <ProtectedRoute allowedRoles={['admin', 'doctor']}>
+                  <ProtectedRoute requiredPermission="manage_billing">
                     <BillingPage />
                   </ProtectedRoute>
                 }
@@ -118,7 +139,7 @@ export default function App() {
               <Route
                 path="medicines"
                 element={
-                  <ProtectedRoute allowedRoles={['admin', 'clinic_admin', 'doctor']}>
+                  <ProtectedRoute requiredPermission="manage_medicines">
                     <MedicinesPage />
                   </ProtectedRoute>
                 }
@@ -126,7 +147,7 @@ export default function App() {
               <Route
                 path="services"
                 element={
-                  <ProtectedRoute allowedRoles={['admin', 'doctor', 'receptionist']}>
+                  <ProtectedRoute requiredPermission="manage_services">
                     <DentalServicesPage />
                   </ProtectedRoute>
                 }
@@ -134,7 +155,7 @@ export default function App() {
               <Route
                 path="users"
                 element={
-                  <ProtectedRoute allowedRoles={['admin']}>
+                  <ProtectedRoute requiredPermission="manage_users">
                     <UsersPage />
                   </ProtectedRoute>
                 }
@@ -142,7 +163,7 @@ export default function App() {
               <Route
                 path="staff-roles"
                 element={
-                  <ProtectedRoute allowedRoles={['admin', 'clinic_admin']}>
+                  <ProtectedRoute requiredPermission="manage_staff_roles">
                     <StaffRolesPage />
                   </ProtectedRoute>
                 }
@@ -150,7 +171,7 @@ export default function App() {
               <Route
                 path="clinics"
                 element={
-                  <ProtectedRoute allowedRoles={['admin']}>
+                  <ProtectedRoute requiredPermission="manage_clinics">
                     <ClinicsPage />
                   </ProtectedRoute>
                 }

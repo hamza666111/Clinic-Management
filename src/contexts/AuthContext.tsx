@@ -2,6 +2,7 @@ import { createContext, useContext, useEffect, useState, ReactNode, useCallback 
 import { User, Session } from '@supabase/supabase-js';
 import { supabase } from '../lib/supabase';
 import { UserProfile } from '../lib/types';
+import { mergePermissionsWithDefaults, resolvePermissionKeys } from '../lib/portalPermissions';
 
 interface AuthContextType {
   user: User | null;
@@ -16,12 +17,138 @@ interface AuthContextType {
 
 const AuthContext = createContext<AuthContextType | undefined>(undefined);
 
+const isMissingColumnError = (message: string, column: string) => {
+  const msg = message.toLowerCase();
+  return msg.includes(column.toLowerCase()) && (msg.includes('column') || msg.includes('does not exist'));
+};
+
+const isMissingTableError = (message: string, table: string) => {
+  const msg = message.toLowerCase();
+  return msg.includes(`public.${table}`) || msg.includes(`relation "${table}"`) || msg.includes(`table '${table}'`);
+};
+
+type RawUserProfile = Omit<UserProfile, 'dynamic_role_id'> & {
+  dynamic_role_id?: string | null;
+  clinic_role_id?: string | null;
+};
+
 export function AuthProvider({ children }: { children: ReactNode }) {
   const [user, setUser] = useState<User | null>(null);
   const [session, setSession] = useState<Session | null>(null);
   const [profile, setProfile] = useState<UserProfile | null>(null);
   const [permissions, setPermissions] = useState<Record<string, boolean>>({});
   const [loading, setLoading] = useState(true);
+
+  const fetchRolePermissions = useCallback(async (roleId: string): Promise<Record<string, boolean>> => {
+    try {
+      const modernResult = await supabase
+        .from('role_permissions')
+        .select('permission_key, can_read, can_write')
+        .eq('role_id', roleId);
+
+      if (!modernResult.error) {
+        const permMap: Record<string, boolean> = {};
+        modernResult.data?.forEach((row: any) => {
+          const enabled = Boolean(row.can_read || row.can_write);
+          const keys = resolvePermissionKeys(String(row.permission_key || ''));
+
+          if (!keys.length && row.permission_key) {
+            permMap[String(row.permission_key)] = enabled;
+            return;
+          }
+
+          keys.forEach((key) => {
+            permMap[key] = enabled;
+          });
+        });
+        return permMap;
+      }
+
+      const modernMessage = modernResult.error.message || '';
+      if (isMissingTableError(modernMessage, 'role_permissions')) {
+        return {};
+      }
+
+      const shouldFallbackToLegacy =
+        isMissingColumnError(modernMessage, 'permission_key') ||
+        isMissingColumnError(modernMessage, 'can_read') ||
+        isMissingColumnError(modernMessage, 'can_write');
+
+      if (!shouldFallbackToLegacy) {
+        throw modernResult.error;
+      }
+
+      const legacyResult = await supabase
+        .from('role_permissions')
+        .select('page_key, can_view, can_edit, can_delete')
+        .eq('role_id', roleId);
+
+      if (legacyResult.error) {
+        const legacyMessage = legacyResult.error.message || '';
+        if (isMissingTableError(legacyMessage, 'role_permissions')) {
+          return {};
+        }
+        throw legacyResult.error;
+      }
+
+      const permMap: Record<string, boolean> = {};
+      legacyResult.data?.forEach((row: any) => {
+        const enabled = Boolean(row.can_view || row.can_edit || row.can_delete);
+        const keys = resolvePermissionKeys(String(row.page_key || ''));
+        keys.forEach((key) => {
+          permMap[key] = enabled;
+        });
+      });
+
+      return permMap;
+    } catch (error) {
+      console.error('Error fetching role permissions:', error);
+      return {};
+    }
+  }, []);
+
+  const resolveRoleIdForProfile = useCallback(async (profileData: RawUserProfile): Promise<string | null> => {
+    if (profileData.dynamic_role_id) return profileData.dynamic_role_id;
+    if (profileData.clinic_role_id) return profileData.clinic_role_id;
+
+    try {
+      if (profileData.clinic_id) {
+        const clinicRoleResult = await supabase
+          .from('roles')
+          .select('id')
+          .eq('name', profileData.role)
+          .eq('clinic_id', profileData.clinic_id)
+          .maybeSingle();
+
+        if (!clinicRoleResult.error && clinicRoleResult.data?.id) {
+          return clinicRoleResult.data.id;
+        }
+
+        if (clinicRoleResult.error && !isMissingTableError(clinicRoleResult.error.message || '', 'roles')) {
+          console.error('Error looking up clinic role:', clinicRoleResult.error);
+        }
+      }
+
+      const systemRoleResult = await supabase
+        .from('roles')
+        .select('id')
+        .eq('name', profileData.role)
+        .eq('is_system_default', true)
+        .maybeSingle();
+
+      if (systemRoleResult.error) {
+        if (!isMissingTableError(systemRoleResult.error.message || '', 'roles')) {
+          console.error('Error looking up system role:', systemRoleResult.error);
+        }
+        return null;
+      }
+
+      return systemRoleResult.data?.id || null;
+    } catch (error) {
+      console.error('Failed to resolve role id:', error);
+      return null;
+    }
+  }, []);
 
   const fetchProfile = useCallback(async (userId: string) => {
     try {
@@ -45,41 +172,24 @@ export function AuthProvider({ children }: { children: ReactNode }) {
       }
 
       if (data) {
-        setProfile(data as UserProfile);
-        
-        // Fetch custom role permissions if applicable
-        if (data.dynamic_role_id) {
-          const { data: permsData } = await supabase
-            .from('role_permissions')
-            .select('permission_key, can_read')
-            .eq('role_id', data.dynamic_role_id);
-            
-          const permMap: Record<string, boolean> = {};
-          permsData?.forEach(p => {
-            permMap[p.permission_key] = p.can_read;
-          });
-          setPermissions(permMap);
-        } else {
-          // Fallbacks for standard legacy roles
-          const permMap: Record<string, boolean> = {
-            view_revenue: ['admin', 'clinic_admin'].includes(data.role),
-            manage_appointments: true,
-            manage_billing: ['admin', 'clinic_admin', 'doctor', 'receptionist'].includes(data.role),
-            manage_patients: true,
-            manage_staff: ['admin', 'clinic_admin'].includes(data.role),
-            manage_services: ['admin', 'clinic_admin', 'doctor', 'receptionist'].includes(data.role)
-          };
-          setPermissions(permMap);
-        }
-        
-        return data;
+        const profileData = data as RawUserProfile;
+        setProfile(profileData as UserProfile);
+
+        const roleId = await resolveRoleIdForProfile(profileData);
+        const permissionOverrides = roleId ? await fetchRolePermissions(roleId) : {};
+
+        setPermissions(mergePermissionsWithDefaults(profileData.role, permissionOverrides));
+
+        return profileData;
       }
+
+      setPermissions({});
       return null;
     } catch (err) {
       console.error('Profile fetch exception:', err);
       return null;
     }
-  }, []);
+  }, [fetchRolePermissions, resolveRoleIdForProfile]);
 
   const refreshProfile = useCallback(async () => {
     if (user) {
