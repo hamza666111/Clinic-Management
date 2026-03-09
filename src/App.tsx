@@ -6,6 +6,7 @@ import PublicLayout from './layouts/PublicLayout';
 import PortalLayout from './layouts/PortalLayout';
 import ProtectedRoute from './routes/ProtectedRoute';
 import LoadingSpinner from './components/ui/LoadingSpinner';
+import { isSupabaseConfigured, supabaseConfigError } from './lib/supabase';
 
 const HomePage = lazy(() => import('./pages/public/HomePage'));
 const ServicesPage = lazy(() => import('./pages/public/ServicesPage'));
@@ -34,7 +35,33 @@ function PageLoader() {
   );
 }
 
+function MissingConfigPage() {
+  return (
+    <div className="min-h-screen bg-slate-50 flex items-center justify-center p-6">
+      <div className="w-full max-w-2xl rounded-2xl border border-amber-200 bg-white p-8 shadow-sm">
+        <h1 className="text-2xl font-bold text-slate-900">Configuration Required</h1>
+        <p className="mt-3 text-slate-700">
+          {supabaseConfigError}
+        </p>
+
+        <div className="mt-6 rounded-xl bg-slate-900 p-4 text-sm text-slate-100">
+          <p>VITE_SUPABASE_URL=https://your-project-ref.supabase.co</p>
+          <p>VITE_SUPABASE_ANON_KEY=your-public-anon-key</p>
+        </div>
+
+        <p className="mt-4 text-sm text-slate-600">
+          After adding these variables in Vercel, trigger a new deployment.
+        </p>
+      </div>
+    </div>
+  );
+}
+
 export default function App() {
+  if (!isSupabaseConfigured) {
+    return <MissingConfigPage />;
+  }
+
   return (
     <BrowserRouter>
       <AuthProvider>
