@@ -1,5 +1,5 @@
 import { useState, useEffect, useCallback, useMemo } from 'react';
-import { Plus, Search, Edit2, Trash2, Calendar, ChevronLeft, ChevronRight } from 'lucide-react';
+import { Plus, Search, Edit2, Trash2, Calendar, ChevronLeft, ChevronRight, UserPlus, ChevronDown } from 'lucide-react';
 import { supabase } from '../../lib/supabase';
 import { Appointment, Patient, Clinic, UserProfile } from '../../lib/types';
 import { useAuth } from '../../contexts/AuthContext';
@@ -33,6 +33,14 @@ export default function AppointmentsPage() {
   const [editAppt, setEditAppt] = useState<Appointment | null>(null);
   const [deleteAppt, setDeleteAppt] = useState<Appointment | null>(null);
   const [saving, setSaving] = useState(false);
+  const [showNewPatient, setShowNewPatient] = useState(false);
+  const [savingPatient, setSavingPatient] = useState(false);
+  const [newPatientForm, setNewPatientForm] = useState({
+    name: '',
+    contact: '',
+    gender: 'male' as 'male' | 'female' | 'other',
+    age: '',
+  });
 
   const [form, setForm] = useState({
     patient_id: '',
@@ -71,14 +79,72 @@ export default function AppointmentsPage() {
 
   const openAdd = () => {
     setEditAppt(null);
+    setShowNewPatient(false);
+    setNewPatientForm({ name: '', contact: '', gender: 'male', age: '' });
     setForm({ patient_id: '', doctor_id: profile?.role === 'doctor' ? profile.id : '', clinic_id: profile?.clinic_id || '', appointment_date: format(new Date(), 'yyyy-MM-dd'), appointment_time: '09:00', status: 'scheduled', notes: '' });
     setShowForm(true);
   };
 
   const openEdit = (appt: Appointment) => {
     setEditAppt(appt);
+    setShowNewPatient(false);
+    setNewPatientForm({ name: '', contact: '', gender: 'male', age: '' });
     setForm({ patient_id: appt.patient_id, doctor_id: appt.doctor_id || '', clinic_id: appt.clinic_id || '', appointment_date: appt.appointment_date, appointment_time: appt.appointment_time?.slice(0, 5) || '09:00', status: appt.status, notes: appt.notes || '' });
     setShowForm(true);
+  };
+
+  const handleAddPatient = async () => {
+    if (!newPatientForm.name.trim()) {
+      toast.error('Patient name is required.');
+      return;
+    }
+
+    setSavingPatient(true);
+
+    const assignedClinicId = profile?.role === 'admin'
+      ? (form.clinic_id || null)
+      : (profile?.clinic_id || form.clinic_id || null);
+
+    const assignedDoctorId = profile?.role === 'doctor'
+      ? profile.id
+      : (form.doctor_id || null);
+
+    const { data, error } = await supabase
+      .from('patients')
+      .insert({
+        name: newPatientForm.name.trim(),
+        contact: newPatientForm.contact.trim(),
+        gender: newPatientForm.gender,
+        age: newPatientForm.age ? Number(newPatientForm.age) : 0,
+        email: '',
+        address: '',
+        medical_history: '',
+        dental_history: '',
+        notes: '',
+        clinic_id: assignedClinicId,
+        doctor_id: assignedDoctorId,
+      })
+      .select('id, name, clinic_id, doctor_id')
+      .maybeSingle();
+
+    setSavingPatient(false);
+
+    if (error || !data) {
+      toast.error('Failed to add patient.');
+      return;
+    }
+
+    const created = data as Patient;
+    setPatients(prev => [created, ...prev.filter(p => p.id !== created.id)]);
+    setForm(f => ({
+      ...f,
+      patient_id: created.id,
+      clinic_id: f.clinic_id || (created.clinic_id || ''),
+      doctor_id: f.doctor_id || (created.doctor_id || ''),
+    }));
+    setNewPatientForm({ name: '', contact: '', gender: 'male', age: '' });
+    setShowNewPatient(false);
+    toast.success(`Patient "${created.name}" added and selected.`);
   };
 
   const handleSave = async (e: React.FormEvent) => {
@@ -222,11 +288,85 @@ export default function AppointmentsPage() {
       <Modal isOpen={showForm} onClose={() => setShowForm(false)} title={editAppt ? 'Edit Appointment' : 'Schedule Appointment'} size="md">
         <form onSubmit={handleSave} className="space-y-4">
           <div>
-            <label className="block text-sm font-medium text-gray-700 mb-1.5">Patient *</label>
+            <div className="flex items-center justify-between mb-1.5">
+              <label className="text-sm font-medium text-gray-700">Patient *</label>
+              <button
+                type="button"
+                onClick={() => setShowNewPatient(v => !v)}
+                className={`flex items-center gap-1.5 text-xs font-medium px-2.5 py-1 rounded-lg transition-colors ${showNewPatient ? 'bg-sky-100 text-sky-700' : 'text-sky-600 hover:bg-sky-50'}`}
+              >
+                <UserPlus className="w-3.5 h-3.5" />
+                Quick Add
+                <ChevronDown className={`w-3 h-3 transition-transform ${showNewPatient ? 'rotate-180' : ''}`} />
+              </button>
+            </div>
             <select required value={form.patient_id} onChange={e => setForm({...form, patient_id: e.target.value})} className="w-full px-3.5 py-2.5 border border-gray-200 rounded-xl focus:outline-none focus:ring-2 focus:ring-sky-300 text-sm">
               <option value="">Select Patient</option>
               {patients.map(p => <option key={p.id} value={p.id}>{p.name}</option>)}
             </select>
+
+            {showNewPatient && (
+              <div className="mt-3 bg-sky-50 border border-sky-100 rounded-2xl p-4 space-y-3">
+                <div className="flex items-center gap-2">
+                  <UserPlus className="w-4 h-4 text-sky-600" />
+                  <p className="text-sm font-semibold text-sky-800">Quick Add Patient</p>
+                  <p className="text-xs text-sky-500 ml-auto">Will be selected automatically</p>
+                </div>
+                <div className="grid grid-cols-2 gap-3">
+                  <div className="col-span-2">
+                    <input
+                      type="text"
+                      placeholder="Full name *"
+                      value={newPatientForm.name}
+                      onChange={e => setNewPatientForm(f => ({ ...f, name: e.target.value }))}
+                      className="w-full px-3 py-2 border border-sky-200 rounded-xl text-sm focus:outline-none focus:ring-2 focus:ring-sky-300 bg-white"
+                    />
+                  </div>
+                  <div>
+                    <input
+                      type="tel"
+                      placeholder="Contact number"
+                      value={newPatientForm.contact}
+                      onChange={e => setNewPatientForm(f => ({ ...f, contact: e.target.value }))}
+                      className="w-full px-3 py-2 border border-sky-200 rounded-xl text-sm focus:outline-none focus:ring-2 focus:ring-sky-300 bg-white"
+                    />
+                  </div>
+                  <div>
+                    <input
+                      type="number"
+                      placeholder="Age"
+                      min="0"
+                      max="120"
+                      value={newPatientForm.age}
+                      onChange={e => setNewPatientForm(f => ({ ...f, age: e.target.value }))}
+                      className="w-full px-3 py-2 border border-sky-200 rounded-xl text-sm focus:outline-none focus:ring-2 focus:ring-sky-300 bg-white"
+                    />
+                  </div>
+                  <div>
+                    <select
+                      value={newPatientForm.gender}
+                      onChange={e => setNewPatientForm(f => ({ ...f, gender: e.target.value as 'male' | 'female' | 'other' }))}
+                      className="w-full px-3 py-2 border border-sky-200 rounded-xl text-sm focus:outline-none focus:ring-2 focus:ring-sky-300 bg-white"
+                    >
+                      <option value="male">Male</option>
+                      <option value="female">Female</option>
+                      <option value="other">Other</option>
+                    </select>
+                  </div>
+                  <div className="flex items-end">
+                    <button
+                      type="button"
+                      onClick={handleAddPatient}
+                      disabled={savingPatient}
+                      className="w-full flex items-center justify-center gap-2 px-4 py-2 bg-sky-600 text-white rounded-xl hover:bg-sky-700 transition-colors text-sm font-medium disabled:opacity-60"
+                    >
+                      {savingPatient ? <div className="w-4 h-4 border-2 border-white/30 border-t-white rounded-full animate-spin" /> : <Plus className="w-4 h-4" />}
+                      Add & Select
+                    </button>
+                  </div>
+                </div>
+              </div>
+            )}
           </div>
           <div className="grid grid-cols-2 gap-4">
             <div>

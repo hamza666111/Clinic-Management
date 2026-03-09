@@ -60,6 +60,15 @@ export default function BillingPage() {
 
   const handleAddPatient = async () => {
     if (!newPatientForm.name.trim()) { toast.error('Patient name is required.'); return; }
+
+    const assignedClinicId = profile?.role === 'admin'
+      ? (form.clinic_id || null)
+      : (profile?.clinic_id || form.clinic_id || null);
+
+    const assignedDoctorId = profile?.role === 'doctor'
+      ? profile.id
+      : (form.doctor_id || null);
+
     setSavingPatient(true);
     const { data, error } = await supabase.from('patients').insert({
       name: newPatientForm.name.trim(),
@@ -67,6 +76,8 @@ export default function BillingPage() {
       gender: newPatientForm.gender,
       age: newPatientForm.age ? Number(newPatientForm.age) : null,
       email: '', address: '', medical_history: '', dental_history: '', notes: '',
+      clinic_id: assignedClinicId,
+      doctor_id: assignedDoctorId,
     }).select('id, name').maybeSingle();
     setSavingPatient(false);
     if (error || !data) { toast.error('Failed to add patient.'); return; }

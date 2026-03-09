@@ -17,6 +17,9 @@ interface Permission {
   can_write: boolean;
 }
 
+type RoleSchemaMode = 'roles' | 'clinic_roles';
+type PermissionSchemaMode = 'modern' | 'legacy';
+
 const AVAILABLE_PERMISSIONS = [
   { key: 'view_dashboard', label: 'Dashboard', desc: 'View basic dashboard metrics' },
   { key: 'view_revenue', label: 'Total Revenue', desc: 'Can see total revenue figures' },
@@ -27,11 +30,33 @@ const AVAILABLE_PERMISSIONS = [
   { key: 'manage_services', label: 'Services', desc: 'Manage service categories and prices' }
 ];
 
+const LEGACY_PERMISSION_KEY_MAP: Record<string, string[]> = {
+  view_dashboard: ['view_dashboard', 'dashboard'],
+  view_revenue: ['view_revenue', 'revenue'],
+  manage_appointments: ['manage_appointments', 'appointments'],
+  manage_billing: ['manage_billing', 'billing', 'invoices'],
+  manage_patients: ['manage_patients', 'patients'],
+  manage_staff: ['manage_staff', 'staff', 'staff_management'],
+  manage_services: ['manage_services', 'services'],
+};
+
+const isMissingTableError = (message: string, table: string) => {
+  const msg = message.toLowerCase();
+  return msg.includes(`public.${table}`) || msg.includes(`relation "${table}"`) || msg.includes(`table '${table}'`);
+};
+
+const isMissingColumnError = (message: string, column: string) => {
+  const msg = message.toLowerCase();
+  return msg.includes(column.toLowerCase()) && (msg.includes('column') || msg.includes('does not exist'));
+};
+
 export default function StaffRolesPage() {
   const { profile } = useAuth();
   const [roles, setRoles] = useState<Role[]>([]);
   const [selectedRole, setSelectedRole] = useState<Role | null>(null);
   const [permissions, setPermissions] = useState<Record<string, Permission>>({});
+  const [roleSchemaMode, setRoleSchemaMode] = useState<RoleSchemaMode>('roles');
+  const [permissionSchemaMode, setPermissionSchemaMode] = useState<PermissionSchemaMode>('modern');
   const [loading, setLoading] = useState(true);
   const [saving, setSaving] = useState(false);
   const [newRoleName, setNewRoleName] = useState('');
@@ -52,18 +77,55 @@ export default function StaffRolesPage() {
   const fetchRoles = async () => {
     try {
       setLoading(true);
-      const { data, error } = await supabase
+      const roleFilter = profile?.clinic_id
+        ? `clinic_id.eq.${profile.clinic_id},is_system_default.eq.true`
+        : 'is_system_default.eq.true';
+
+      let normalizedRoles: Role[] = [];
+
+      const modernResult = await supabase
         .from('roles')
-        .select('*')
-        .or(`clinic_id.eq.${profile?.clinic_id},is_system_default.eq.true`)
+        .select('id, name, is_system_default, clinic_id')
+        .or(roleFilter)
         .order('is_system_default', { ascending: false })
         .order('name');
-        
-      if (error) throw error;
-      setRoles(data || []);
-      if (data && data.length > 0 && !selectedRole) {
-        setSelectedRole(data[0]);
+
+      if (modernResult.error) {
+        if (!isMissingTableError(modernResult.error.message || '', 'roles')) {
+          throw modernResult.error;
+        }
+
+        const legacyFilter = profile?.clinic_id
+          ? `clinic_id.eq.${profile.clinic_id},is_default.eq.true`
+          : 'is_default.eq.true';
+
+        const legacyResult = await supabase
+          .from('clinic_roles')
+          .select('id, role_name, is_default, clinic_id')
+          .or(legacyFilter)
+          .order('is_default', { ascending: false })
+          .order('role_name');
+
+        if (legacyResult.error) throw legacyResult.error;
+
+        setRoleSchemaMode('clinic_roles');
+        normalizedRoles = (legacyResult.data || []).map((r: any) => ({
+          id: r.id,
+          name: r.role_name,
+          is_system_default: Boolean(r.is_default),
+          clinic_id: r.clinic_id,
+        }));
+      } else {
+        setRoleSchemaMode('roles');
+        normalizedRoles = (modernResult.data || []) as Role[];
       }
+
+      setRoles(normalizedRoles);
+      setSelectedRole(prev => {
+        if (!normalizedRoles.length) return null;
+        if (!prev) return normalizedRoles[0];
+        return normalizedRoles.find(r => r.id === prev.id) || normalizedRoles[0];
+      });
     } catch (err: any) {
       toast.error('Failed to load roles: ' + err.message);
     } finally {
@@ -73,17 +135,57 @@ export default function StaffRolesPage() {
 
   const fetchPermissions = async (roleId: string) => {
     try {
-      const { data, error } = await supabase
+      const modernResult = await supabase
         .from('role_permissions')
-        .select('*')
+        .select('permission_key, can_read, can_write')
         .eq('role_id', roleId);
-        
-      if (error) throw error;
-      
+
+      if (!modernResult.error) {
+        const permMap: Record<string, Permission> = {};
+        modernResult.data?.forEach((p: any) => {
+          permMap[p.permission_key] = {
+            permission_key: p.permission_key,
+            can_read: Boolean(p.can_read),
+            can_write: Boolean(p.can_write),
+          };
+        });
+        setPermissionSchemaMode('modern');
+        setPermissions(permMap);
+        return;
+      }
+
+      const modernMessage = modernResult.error.message || '';
+      const shouldFallbackToLegacy =
+        isMissingColumnError(modernMessage, 'permission_key') ||
+        isMissingColumnError(modernMessage, 'can_read') ||
+        isMissingColumnError(modernMessage, 'can_write');
+
+      if (!shouldFallbackToLegacy) {
+        throw modernResult.error;
+      }
+
+      const legacyResult = await supabase
+        .from('role_permissions')
+        .select('page_key, can_view, can_edit, can_delete')
+        .eq('role_id', roleId);
+
+      if (legacyResult.error) throw legacyResult.error;
+
+      const legacyRows = legacyResult.data || [];
       const permMap: Record<string, Permission> = {};
-      data?.forEach(p => {
-        permMap[p.permission_key] = p;
+
+      AVAILABLE_PERMISSIONS.forEach((perm) => {
+        const aliases = LEGACY_PERMISSION_KEY_MAP[perm.key] || [perm.key];
+        const match = legacyRows.find((row: any) => aliases.includes(row.page_key));
+        const enabled = Boolean(match && (match.can_view || match.can_edit || match.can_delete));
+        permMap[perm.key] = {
+          permission_key: perm.key,
+          can_read: enabled,
+          can_write: enabled,
+        };
       });
+
+      setPermissionSchemaMode('legacy');
       setPermissions(permMap);
     } catch (err: any) {
       toast.error('Failed to load permissions: ' + err.message);
@@ -105,22 +207,50 @@ export default function StaffRolesPage() {
     if (!selectedRole) return;
     try {
       setSaving(true);
-      
-      const permsToUpsert = Object.values(permissions).map(p => ({
-        role_id: selectedRole.id,
-        permission_key: p.permission_key,
-        can_read: p.can_read,
-        can_write: p.can_write
-      }));
 
-      // Delete old permissions first (simplest approach for full sync)
-      await supabase.from('role_permissions').delete().eq('role_id', selectedRole.id);
+      if (permissionSchemaMode === 'legacy') {
+        const legacyRows = Object.values(permissions).map(p => ({
+          role_id: selectedRole.id,
+          page_key: (LEGACY_PERMISSION_KEY_MAP[p.permission_key] || [p.permission_key])[0],
+          can_view: p.can_read,
+          can_edit: p.can_write,
+          can_delete: p.can_write,
+        }));
 
-      if (permsToUpsert.length > 0) {
-        const { error } = await supabase
+        const { error: deleteLegacyError } = await supabase
           .from('role_permissions')
-          .insert(permsToUpsert);
-        if (error) throw error;
+          .delete()
+          .eq('role_id', selectedRole.id);
+
+        if (deleteLegacyError) throw deleteLegacyError;
+
+        if (legacyRows.length > 0) {
+          const { error: insertLegacyError } = await supabase
+            .from('role_permissions')
+            .insert(legacyRows);
+          if (insertLegacyError) throw insertLegacyError;
+        }
+      } else {
+        const permsToUpsert = Object.values(permissions).map(p => ({
+          role_id: selectedRole.id,
+          permission_key: p.permission_key,
+          can_read: p.can_read,
+          can_write: p.can_write,
+        }));
+
+        const { error: deleteModernError } = await supabase
+          .from('role_permissions')
+          .delete()
+          .eq('role_id', selectedRole.id);
+
+        if (deleteModernError) throw deleteModernError;
+
+        if (permsToUpsert.length > 0) {
+          const { error: insertModernError } = await supabase
+            .from('role_permissions')
+            .insert(permsToUpsert);
+          if (insertModernError) throw insertModernError;
+        }
       }
       
       toast.success('Permissions saved successfully');
@@ -134,22 +264,46 @@ export default function StaffRolesPage() {
   const handleAddRole = async () => {
     if (!newRoleName.trim()) return;
     try {
-      const { data, error } = await supabase
-        .from('roles')
-        .insert([{ 
-          name: newRoleName.trim(), 
-          clinic_id: profile?.clinic_id,
-          is_system_default: false 
-        }])
-        .select()
-        .single();
-        
-      if (error) throw error;
-      
-      setRoles([...roles, data]);
+      let createdRole: Role;
+
+      if (roleSchemaMode === 'clinic_roles') {
+        const { data, error } = await supabase
+          .from('clinic_roles')
+          .insert([{ 
+            role_name: newRoleName.trim(),
+            clinic_id: profile?.clinic_id,
+            is_default: false,
+          }])
+          .select('id, role_name, is_default, clinic_id')
+          .single();
+
+        if (error) throw error;
+
+        createdRole = {
+          id: data.id,
+          name: data.role_name,
+          is_system_default: Boolean(data.is_default),
+          clinic_id: data.clinic_id,
+        };
+      } else {
+        const { data, error } = await supabase
+          .from('roles')
+          .insert([{ 
+            name: newRoleName.trim(),
+            clinic_id: profile?.clinic_id,
+            is_system_default: false,
+          }])
+          .select('id, name, is_system_default, clinic_id')
+          .single();
+
+        if (error) throw error;
+        createdRole = data as Role;
+      }
+
+      setRoles([...roles, createdRole]);
       setNewRoleName('');
       setIsAddingRole(false);
-      setSelectedRole(data);
+      setSelectedRole(createdRole);
       toast.success('Role created successfully');
     } catch (err: any) {
       toast.error('Failed to create role: ' + err.message);

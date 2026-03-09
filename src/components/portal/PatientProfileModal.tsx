@@ -3,11 +3,14 @@ import { motion, AnimatePresence } from 'framer-motion';
 import {
   X, User, Calendar, FileText, Image as ImageIcon, Pill,
   Phone, Mail, MapPin, Clock, ChevronRight, FileUp, AlertCircle,
-  CalendarRange, CheckCircle2, AlertTriangle
+  CalendarRange, CheckCircle2, AlertTriangle, Trash2
 } from 'lucide-react';
 import { format } from 'date-fns';
 import { supabase } from '../../lib/supabase';
 import { Patient, Appointment, Prescription, PatientFile } from '../../lib/types';
+import { useAuth } from '../../contexts/AuthContext';
+import { useToast } from '../../hooks/useToast';
+import ConfirmDialog from '../ui/ConfirmDialog';
 
 function rxStatus(start_date: string | null, end_date: string | null) {
   const today = new Date(); today.setHours(0, 0, 0, 0);
@@ -41,6 +44,9 @@ const STATUS_COLORS: Record<string, string> = {
 };
 
 export default function PatientProfileModal({ patient, onClose }: Props) {
+  const { profile } = useAuth();
+  const toast = useToast();
+
   const [tab, setTab] = useState<Tab>('info');
   const [appointments, setAppointments] = useState<Appointment[]>([]);
   const [prescriptions, setPrescriptions] = useState<Prescription[]>([]);
@@ -48,6 +54,10 @@ export default function PatientProfileModal({ patient, onClose }: Props) {
   const [publicUrls, setPublicUrls] = useState<Record<string, string>>({});
   const [loading, setLoading] = useState(false);
   const [lightbox, setLightbox] = useState<string | null>(null);
+  const [deleteFile, setDeleteFile] = useState<PatientFile | null>(null);
+  const [deletingFile, setDeletingFile] = useState(false);
+
+  const canManageFiles = profile?.role === 'admin' || profile?.role === 'clinic_admin' || profile?.role === 'doctor';
 
   useEffect(() => {
     if (!patient) return;
@@ -56,6 +66,7 @@ export default function PatientProfileModal({ patient, onClose }: Props) {
     setPrescriptions([]);
     setFiles([]);
     setPublicUrls({});
+    setDeleteFile(null);
   }, [patient?.id]);
 
   useEffect(() => {
@@ -102,14 +113,26 @@ export default function PatientProfileModal({ patient, onClose }: Props) {
     setFiles(fileList);
 
     const urls: Record<string, string> = {};
-    fileList.forEach(f => {
+    await Promise.all(fileList.map(async (f) => {
       const path = extractPath(f.file_url);
-      if (path) {
-        urls[f.id] = supabase.storage.from('patient-files').getPublicUrl(path).data.publicUrl;
-      } else {
+
+      if (!path) {
         urls[f.id] = f.file_url;
+        return;
       }
-    });
+
+      const { data: signedData, error: signedError } = await supabase.storage
+        .from('patient-files')
+        .createSignedUrl(path, 60 * 60);
+
+      if (!signedError && signedData?.signedUrl) {
+        urls[f.id] = signedData.signedUrl;
+        return;
+      }
+
+      urls[f.id] = supabase.storage.from('patient-files').getPublicUrl(path).data.publicUrl;
+    }));
+
     setPublicUrls(urls);
     setLoading(false);
   };
@@ -119,6 +142,7 @@ export default function PatientProfileModal({ patient, onClose }: Props) {
       const markers = [
         '/object/public/patient-files/',
         '/object/authenticated/patient-files/',
+        '/object/sign/patient-files/',
       ];
       for (const m of markers) {
         if (url.includes(m)) return decodeURIComponent(url.split(m)[1].split('?')[0]);
@@ -130,6 +154,37 @@ export default function PatientProfileModal({ patient, onClose }: Props) {
       if (!url.startsWith('http')) return url;
       return null;
     } catch { return null; }
+  };
+
+  const handleDeleteFile = async () => {
+    if (!deleteFile) return;
+
+    setDeletingFile(true);
+
+    const storagePath = extractPath(deleteFile.file_url);
+    if (storagePath) {
+      await supabase.storage.from('patient-files').remove([storagePath]);
+    }
+
+    const { error } = await supabase
+      .from('patient_files')
+      .delete()
+      .eq('id', deleteFile.id);
+
+    setDeletingFile(false);
+
+    if (error) {
+      toast.error('Failed to delete file.');
+      return;
+    }
+
+    if (lightbox && publicUrls[deleteFile.id] === lightbox) {
+      setLightbox(null);
+    }
+
+    toast.success('File deleted.');
+    setDeleteFile(null);
+    await fetchFiles();
   };
 
   if (!patient) return null;
@@ -220,6 +275,8 @@ export default function PatientProfileModal({ patient, onClose }: Props) {
                       publicUrls={publicUrls}
                       loading={loading}
                       onLightbox={setLightbox}
+                      canDelete={canManageFiles}
+                      onDeleteFile={setDeleteFile}
                     />
                   )}
                 </motion.div>
@@ -256,6 +313,16 @@ export default function PatientProfileModal({ patient, onClose }: Props) {
           </motion.div>
         )}
       </AnimatePresence>
+
+      <ConfirmDialog
+        isOpen={!!deleteFile}
+        onConfirm={handleDeleteFile}
+        onCancel={() => setDeleteFile(null)}
+        title="Delete File"
+        message={`Delete "${deleteFile?.file_name || 'this file'}"? This cannot be undone.`}
+        confirmLabel={deletingFile ? 'Deleting...' : 'Delete'}
+        danger
+      />
     </>
   );
 }
@@ -466,11 +533,15 @@ function MediaTab({
   publicUrls,
   loading,
   onLightbox,
+  canDelete,
+  onDeleteFile,
 }: {
   files: PatientFile[];
   publicUrls: Record<string, string>;
   loading: boolean;
   onLightbox: (url: string) => void;
+  canDelete: boolean;
+  onDeleteFile: (file: PatientFile) => void;
 }) {
   if (loading) return <LoadingState rows={3} />;
   if (files.length === 0) return (
@@ -492,6 +563,19 @@ function MediaTab({
                 className="group relative aspect-square rounded-xl overflow-hidden bg-gray-100 cursor-pointer border border-gray-200 hover:border-sky-400 transition-all hover:shadow-md"
                 onClick={() => publicUrls[f.id] && onLightbox(publicUrls[f.id])}
               >
+                {canDelete && (
+                  <button
+                    type="button"
+                    onClick={(e) => {
+                      e.stopPropagation();
+                      onDeleteFile(f);
+                    }}
+                    className="absolute top-2 right-2 z-10 p-1.5 rounded-lg bg-white/90 text-red-600 hover:bg-red-50"
+                    title="Delete file"
+                  >
+                    <Trash2 className="w-3.5 h-3.5" />
+                  </button>
+                )}
                 {publicUrls[f.id] ? (
                   <img
                     src={publicUrls[f.id]}
@@ -522,6 +606,16 @@ function MediaTab({
                   <FileText className="w-4 h-4 text-red-500 shrink-0" />
                   <span className="text-sm font-medium text-gray-700 flex-1 truncate">{f.file_name}</span>
                   <span className="text-xs text-gray-400">{format(new Date(f.created_at), 'MMM d, yyyy')}</span>
+                  {canDelete && (
+                    <button
+                      type="button"
+                      onClick={() => onDeleteFile(f)}
+                      className="p-1.5 rounded-lg text-red-600 hover:bg-red-50"
+                      title="Delete file"
+                    >
+                      <Trash2 className="w-3.5 h-3.5" />
+                    </button>
+                  )}
                 </div>
                 {publicUrls[f.id] && f.file_type === 'pdf' ? (
                   <div className="bg-gray-100">
