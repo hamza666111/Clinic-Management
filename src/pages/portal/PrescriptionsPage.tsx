@@ -83,7 +83,9 @@ export default function PrescriptionsPage() {
 
   useEffect(() => {
     const cid = profile?.role !== 'admin' && profile?.clinic_id ? profile.clinic_id : null;
-    const pQ = cid ? supabase.from('patients').select('id, name').eq('clinic_id', cid).order('name') : supabase.from('patients').select('id, name').order('name');
+    const pQ = cid
+      ? supabase.from('patients').select('id, name, clinic_id, doctor_id').eq('clinic_id', cid).order('name')
+      : supabase.from('patients').select('id, name, clinic_id, doctor_id').order('name');
     const dQ = cid ? supabase.from('users_profile').select('id, name').eq('role', 'doctor').eq('clinic_id', cid).order('name') : supabase.from('users_profile').select('id, name').eq('role', 'doctor').order('name');
     pQ.then(({ data }) => setPatients(data || []));
     supabase.from('medicines').select('*').order('medicine_name').then(({ data }) => setMedicines(data || []));
@@ -263,7 +265,20 @@ export default function PrescriptionsPage() {
           <div className="grid sm:grid-cols-2 gap-4">
             <div>
               <label className="block text-sm font-medium text-gray-700 mb-1.5">Patient *</label>
-              <select required value={form.patient_id} onChange={e => setForm({...form, patient_id: e.target.value})} className="w-full px-3.5 py-2.5 border border-gray-200 rounded-xl focus:outline-none focus:ring-2 focus:ring-sky-300 text-sm">
+              <select
+                required
+                value={form.patient_id}
+                onChange={e => {
+                  const patientId = e.target.value;
+                  const selectedPatient = patients.find(p => p.id === patientId);
+                  setForm(prev => ({
+                    ...prev,
+                    patient_id: patientId,
+                    doctor_id: selectedPatient?.doctor_id || '',
+                  }));
+                }}
+                className="w-full px-3.5 py-2.5 border border-gray-200 rounded-xl focus:outline-none focus:ring-2 focus:ring-sky-300 text-sm"
+              >
                 <option value="">Select Patient</option>
                 {patients.map(p => <option key={p.id} value={p.id}>{p.name}</option>)}
               </select>
