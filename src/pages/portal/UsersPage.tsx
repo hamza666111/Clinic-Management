@@ -43,24 +43,15 @@ interface EditFormData {
 const emptyCreate: CreateFormData = { name: '', email: '', password: '', role: 'doctor', clinic_id: '' };
 const emptyEdit: EditFormData = { name: '', role: 'doctor', clinic_id: '', is_active: true };
 
-async function callEdgeFunction(action: string, payload: Record<string, unknown>, accessToken: string) {
-  const supabaseUrl = import.meta.env.VITE_SUPABASE_URL;
-  const anonKey = import.meta.env.VITE_SUPABASE_ANON_KEY;
-
-  const res = await fetch(`${supabaseUrl}/functions/v1/create-user`, {
-    method: 'POST',
-    headers: {
-      'Content-Type': 'application/json',
-      'Authorization': `Bearer ${accessToken}`,
-      'apikey': anonKey,
-    },
-    body: JSON.stringify({ action, ...payload }),
+async function callEdgeFunction(action: string, payload: Record<string, unknown>) {
+  const { data, error } = await supabase.functions.invoke('create-user', {
+    body: { action, ...payload },
   });
 
-  const data = await res.json();
-  if (!res.ok) {
-    throw new Error(data.error || 'Request failed');
+  if (error) {
+    throw new Error(error.message || 'Request failed');
   }
+
   return data;
 }
 
@@ -191,7 +182,7 @@ export default function UsersPage() {
         password: createForm.password,
         role: createForm.role,
         clinic_id: assignedClinicId,
-      }, session.access_token);
+      });
 
       toast.success(`User ${createForm.name} created successfully`);
       setShowCreate(false);
@@ -240,7 +231,7 @@ export default function UsersPage() {
         role: editForm.role,
         clinic_id: editForm.clinic_id || null,
         is_active: editForm.is_active,
-      }, session.access_token);
+      });
 
       toast.success('User updated successfully');
       setShowEdit(false);
@@ -280,7 +271,7 @@ export default function UsersPage() {
       await callEdgeFunction('update_password', {
         user_id: editTarget.id,
         password: newPassword,
-      }, session.access_token);
+      });
 
       toast.success('Password updated successfully');
       setShowPasswordModal(false);
@@ -307,7 +298,7 @@ export default function UsersPage() {
     try {
       await callEdgeFunction('delete', {
         user_id: deleteTarget.id,
-      }, session.access_token);
+      });
 
       toast.success('User deleted successfully');
       setDeleteTarget(null);
