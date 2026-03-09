@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useMemo, useState } from 'react';
 import { useNavigate } from 'react-router-dom';
-import { Lock, Plus, Users } from 'lucide-react';
+import { Lock, Plus, Trash2, Users } from 'lucide-react';
 import toast from 'react-hot-toast';
 import { useAuth } from '../../contexts/AuthContext';
 import {
@@ -12,6 +12,7 @@ import {
   resolvePermissionKeys,
 } from '../../lib/portalPermissions';
 import { supabase } from '../../lib/supabase';
+import ConfirmDialog from '../../components/ui/ConfirmDialog';
 
 interface ClinicOption {
   id: string;
@@ -277,25 +278,32 @@ export default function StaffRolesPage() {
 
   const [newRoleName, setNewRoleName] = useState('');
   const [isAddingRole, setIsAddingRole] = useState(false);
+  const [deleteRoleTarget, setDeleteRoleTarget] = useState<Role | null>(null);
+  const [deletingRole, setDeletingRole] = useState(false);
 
   const isAdmin = profile?.role === 'admin';
   const hasMultipleClinics = clinics.length > 1;
-  const requiresClinicSelection = isAdmin && hasMultipleClinics && !selectedClinicId;
+  const requiresClinicSelection = activeTab === 'team' && isAdmin && hasMultipleClinics && !selectedClinicId;
 
   const effectiveClinicId = useMemo(() => {
     if (!profile?.role) return null;
+    if (activeTab === 'permissions') return null;
     if (profile.role === 'admin') return selectedClinicId || null;
     return profile.clinic_id || null;
-  }, [profile?.role, profile?.clinic_id, selectedClinicId]);
+  }, [activeTab, profile?.role, profile?.clinic_id, selectedClinicId]);
 
   const selectedClinicName = useMemo(() => {
+    if (activeTab === 'permissions') {
+      return 'All Clinics';
+    }
+
     if (!selectedClinicId) {
       if (isAdmin && hasMultipleClinics) return 'No Clinic Selected';
       return clinics[0]?.clinic_name || 'My Clinic';
     }
 
     return clinics.find((clinic) => clinic.id === selectedClinicId)?.clinic_name || 'Selected Clinic';
-  }, [selectedClinicId, clinics, isAdmin, hasMultipleClinics]);
+  }, [activeTab, selectedClinicId, clinics, isAdmin, hasMultipleClinics]);
 
   const enabledPermissionCount = useMemo(() => {
     return PERMISSION_DEFINITIONS.filter((perm) => permissions[perm.key]?.can_read).length;
@@ -374,14 +382,14 @@ export default function StaffRolesPage() {
 
   const fetchRoles = useCallback(async () => {
     if (!profile) return;
-    if (requiresClinicSelection) return;
+    if (activeTab !== 'permissions') return;
 
     try {
       setLoadingRoles(true);
 
       const roleFilter = effectiveClinicId
-        ? `clinic_id.eq.${effectiveClinicId},is_system_default.eq.true`
-        : 'is_system_default.eq.true';
+        ? `clinic_id.eq.${effectiveClinicId},is_system_default.eq.true,clinic_id.is.null`
+        : 'is_system_default.eq.true,clinic_id.is.null';
 
       let normalizedRoles: Role[] = [];
 
@@ -408,52 +416,50 @@ export default function StaffRolesPage() {
         return legacyQuery;
       };
 
-      if (roleSchemaMode === 'clinic_roles') {
-        const legacyResult = await fetchLegacyRoles();
-
-        if (legacyResult.error) {
-          if (!isMissingTableError({ ...legacyResult.error, status: legacyResult.status }, 'clinic_roles')) {
-            throw legacyResult.error;
-          }
-
-          const modernResult = await fetchModernRoles();
-          if (modernResult.error) throw modernResult.error;
-
-          setRoleSchemaModeWithPreference('roles');
-          normalizedRoles = (modernResult.data || []) as Role[];
-        } else {
-          setRoleSchemaModeWithPreference('clinic_roles');
-          setPermissionSchemaModeWithPreference('legacy');
-          normalizedRoles = ((legacyResult.data || []) as LegacyRoleRow[]).map((row) => ({
+      const mapLegacyRows = (rows: LegacyRoleRow[]) => {
+        if (effectiveClinicId) {
+          return rows.map((row) => ({
             id: row.id,
             name: row.role_name,
             is_system_default: Boolean(row.is_default),
             clinic_id: row.clinic_id,
           }));
         }
+
+        const seen = new Set<string>();
+        const deduped: Role[] = [];
+
+        rows.forEach((row) => {
+          if (seen.has(row.role_name)) return;
+          seen.add(row.role_name);
+          deduped.push({
+            id: row.id,
+            name: row.role_name,
+            is_system_default: Boolean(row.is_default),
+            clinic_id: row.clinic_id,
+          });
+        });
+
+        return deduped;
+      };
+
+      const modernResult = await fetchModernRoles();
+
+      if (!modernResult.error) {
+        setRoleSchemaModeWithPreference('roles');
+        setPermissionSchemaModeWithPreference('modern');
+        normalizedRoles = (modernResult.data || []) as Role[];
       } else {
-        const modernResult = await fetchModernRoles();
-
-        if (modernResult.error) {
-          if (!isMissingTableError({ ...modernResult.error, status: modernResult.status }, 'roles')) {
-            throw modernResult.error;
-          }
-
-          const legacyResult = await fetchLegacyRoles();
-          if (legacyResult.error) throw legacyResult.error;
-
-          setRoleSchemaModeWithPreference('clinic_roles');
-          setPermissionSchemaModeWithPreference('legacy');
-          normalizedRoles = ((legacyResult.data || []) as LegacyRoleRow[]).map((row) => ({
-            id: row.id,
-            name: row.role_name,
-            is_system_default: Boolean(row.is_default),
-            clinic_id: row.clinic_id,
-          }));
-        } else {
-          setRoleSchemaModeWithPreference('roles');
-          normalizedRoles = (modernResult.data || []) as Role[];
+        if (!isMissingTableError({ ...modernResult.error, status: modernResult.status }, 'roles')) {
+          throw modernResult.error;
         }
+
+        const legacyResult = await fetchLegacyRoles();
+        if (legacyResult.error) throw legacyResult.error;
+
+        setRoleSchemaModeWithPreference('clinic_roles');
+        setPermissionSchemaModeWithPreference('legacy');
+        normalizedRoles = mapLegacyRows((legacyResult.data || []) as LegacyRoleRow[]);
       }
 
       const sortedRoles = sortRoles(normalizedRoles);
@@ -467,7 +473,7 @@ export default function StaffRolesPage() {
 
       setSelectedRole((prev) => {
         if (!prev) return sortedRoles[0];
-        return sortedRoles.find((role) => role.id === prev.id) || sortedRoles[0];
+        return sortedRoles.find((role) => role.id === prev.id || role.name === prev.name) || sortedRoles[0];
       });
     } catch (err: unknown) {
       toast.error('Failed to load roles: ' + getErrorMessage(err));
@@ -476,9 +482,9 @@ export default function StaffRolesPage() {
     }
   }, [
     profile,
+    activeTab,
     requiresClinicSelection,
     effectiveClinicId,
-    roleSchemaMode,
     setRoleSchemaModeWithPreference,
     setPermissionSchemaModeWithPreference,
   ]);
@@ -643,17 +649,26 @@ export default function StaffRolesPage() {
   useEffect(() => {
     if (!profile || loadingClinics) return;
 
+    if (activeTab === 'team') {
+      if (requiresClinicSelection) {
+        setTeam([]);
+        return;
+      }
+
+      void fetchTeam();
+      return;
+    }
+
+    setTeam([]);
     if (requiresClinicSelection) {
-      setTeam([]);
       setRoles([]);
       setSelectedRole(null);
       setPermissions({});
       return;
     }
 
-    void fetchTeam();
     void fetchRoles();
-  }, [profile, loadingClinics, selectedClinicId, requiresClinicSelection, fetchRoles, fetchTeam]);
+  }, [profile, loadingClinics, selectedClinicId, requiresClinicSelection, fetchRoles, fetchTeam, activeTab]);
 
   useEffect(() => {
     if (activeTab !== 'permissions') return;
@@ -691,27 +706,41 @@ export default function StaffRolesPage() {
       setSavingPermissions(true);
 
       if (permissionSchemaMode === 'legacy') {
-        const legacyRows = PERMISSION_DEFINITIONS.map((perm) => {
-          const current = permissions[perm.key];
-          return {
-            role_id: selectedRole.id,
-            page_key: (LEGACY_PERMISSION_KEY_MAP[perm.key] || [perm.key])[0],
-            can_view: Boolean(current?.can_read),
-            can_edit: Boolean(current?.can_write),
-            can_delete: Boolean(current?.can_write),
-          };
-        });
+        let roleIds = [selectedRole.id];
 
-        const { error: deleteLegacyError } = await supabase
-          .from('role_permissions')
-          .delete()
-          .eq('role_id', selectedRole.id);
+        if (roleSchemaMode === 'clinic_roles' && !effectiveClinicId) {
+          const { data: matchingRoles, error: rolesError } = await supabase
+            .from('clinic_roles')
+            .select('id')
+            .eq('role_name', selectedRole.name);
 
-        if (deleteLegacyError) throw deleteLegacyError;
+          if (rolesError) throw rolesError;
+          roleIds = (matchingRoles || []).map((r: { id: string }) => r.id);
+        }
 
-        const { error: insertLegacyError } = await supabase.from('role_permissions').insert(legacyRows);
+        for (const roleId of roleIds) {
+          const legacyRows = PERMISSION_DEFINITIONS.map((perm) => {
+            const current = permissions[perm.key];
+            return {
+              role_id: roleId,
+              page_key: (LEGACY_PERMISSION_KEY_MAP[perm.key] || [perm.key])[0],
+              can_view: Boolean(current?.can_read),
+              can_edit: Boolean(current?.can_write),
+              can_delete: Boolean(current?.can_write),
+            };
+          });
 
-        if (insertLegacyError) throw insertLegacyError;
+          const { error: deleteLegacyError } = await supabase
+            .from('role_permissions')
+            .delete()
+            .eq('role_id', roleId);
+
+          if (deleteLegacyError) throw deleteLegacyError;
+
+          const { error: insertLegacyError } = await supabase.from('role_permissions').insert(legacyRows);
+          if (insertLegacyError) throw insertLegacyError;
+        }
+
         setPermissionSchemaModeWithPreference('legacy');
       } else {
         const rows = PERMISSION_DEFINITIONS.map((perm) => {
@@ -748,51 +777,27 @@ export default function StaffRolesPage() {
   };
 
   const handleAddRole = async () => {
-    const roleName = newRoleName.trim().toLowerCase();
+    const roleName = newRoleName.trim().toLowerCase().replace(/\s+/g, '_');
     if (!roleName) return;
 
-    if (roles.some((role) => role.name === roleName && (role.clinic_id === effectiveClinicId || role.is_system_default))) {
-      toast.error('This role already exists in the selected clinic');
+    if (!/^[a-z0-9_]+$/.test(roleName)) {
+      toast.error('Role name can only include lowercase letters, numbers, and underscores.');
       return;
     }
 
-    if (requiresClinicSelection || !effectiveClinicId) {
-      toast.error('Please select a clinic before adding a role');
+    if (roles.some((role) => role.name === roleName)) {
+      toast.error('This role already exists.');
       return;
     }
 
     try {
       const createRoleDirect = async (): Promise<Role> => {
-        if (roleSchemaMode === 'clinic_roles') {
-          const { data, error } = await supabase
-            .from('clinic_roles')
-            .insert([
-              {
-                role_name: roleName,
-                clinic_id: effectiveClinicId,
-                is_default: false,
-              },
-            ])
-            .select('id, role_name, is_default, clinic_id')
-            .single();
-
-          if (error) throw error;
-
-          setRoleSchemaModeWithPreference('clinic_roles');
-          return {
-            id: data.id,
-            name: data.role_name,
-            is_system_default: Boolean(data.is_default),
-            clinic_id: data.clinic_id,
-          };
-        }
-
         const { data, error } = await supabase
           .from('roles')
           .insert([
             {
               name: roleName,
-              clinic_id: effectiveClinicId,
+              clinic_id: null,
               is_system_default: false,
             },
           ])
@@ -802,6 +807,7 @@ export default function StaffRolesPage() {
         if (error) throw error;
 
         setRoleSchemaModeWithPreference('roles');
+        setPermissionSchemaModeWithPreference('modern');
         return data as Role;
       };
 
@@ -810,8 +816,8 @@ export default function StaffRolesPage() {
           body: {
             action: 'create_role',
             role_name: roleName,
-            clinic_id: effectiveClinicId,
-            schema_mode: roleSchemaMode,
+            clinic_id: null,
+            schema_mode: 'roles',
           },
         });
 
@@ -835,7 +841,7 @@ export default function StaffRolesPage() {
           id: created.id,
           name: created.name || created.role_name || roleName,
           is_system_default: Boolean(created.is_system_default ?? created.is_default),
-          clinic_id: created.clinic_id ?? effectiveClinicId ?? null,
+          clinic_id: created.clinic_id ?? null,
         };
       };
 
@@ -844,19 +850,20 @@ export default function StaffRolesPage() {
       try {
         createdRole = await createRoleDirect();
       } catch (directError: unknown) {
-        if (!isPermissionDeniedError(directError)) {
+        const missingRolesTable = isMissingTableError(directError as SupabaseLikeError, 'roles');
+        if (!isPermissionDeniedError(directError) && !missingRolesTable) {
           throw directError;
         }
 
         createdRole = await createRoleViaEdgeFunction();
       }
 
-      const nextRoles = sortRoles([...roles, createdRole]);
+      const nextRoles = sortRoles([...roles.filter((role) => role.name !== createdRole.name), createdRole]);
       setRoles(nextRoles);
       setSelectedRole(createdRole);
       setNewRoleName('');
       setIsAddingRole(false);
-      toast.success('Role created successfully');
+      toast.success('Role created globally and applied to all clinics.');
     } catch (err: unknown) {
       const message = getErrorMessage(err);
 
@@ -876,6 +883,86 @@ export default function StaffRolesPage() {
       }
 
       toast.error('Failed to create role: ' + message);
+    }
+  };
+
+  const handleDeleteRole = async () => {
+    if (!deleteRoleTarget) return;
+
+    if (deleteRoleTarget.is_system_default) {
+      toast.error('System default roles cannot be removed.');
+      setDeleteRoleTarget(null);
+      return;
+    }
+
+    setDeletingRole(true);
+
+    try {
+      const { count, error: inUseError } = await supabase
+        .from('users_profile')
+        .select('id', { count: 'exact', head: true })
+        .eq('role', deleteRoleTarget.name);
+
+      if (inUseError) throw inUseError;
+
+      if ((count || 0) > 0) {
+        toast.error('Cannot remove this role because it is assigned to one or more users.');
+        return;
+      }
+
+      const deleteRoleDirect = async () => {
+        if (roleSchemaMode === 'clinic_roles') {
+          let legacyDelete = supabase.from('clinic_roles').delete().eq('role_name', deleteRoleTarget.name);
+          if (effectiveClinicId) {
+            legacyDelete = supabase.from('clinic_roles').delete().eq('id', deleteRoleTarget.id);
+          }
+          const { error } = await legacyDelete;
+          if (error) throw error;
+          return;
+        }
+
+        const { error } = await supabase.from('roles').delete().eq('id', deleteRoleTarget.id);
+        if (error) throw error;
+      };
+
+      const deleteRoleViaEdgeFunction = async () => {
+        const { error } = await supabase.functions.invoke('create-user', {
+          body: {
+            action: 'delete_role',
+            role_id: deleteRoleTarget.id,
+            role_name: deleteRoleTarget.name,
+            schema_mode: 'roles',
+          },
+        });
+
+        if (error) {
+          const detailedMessage = await extractEdgeFunctionErrorMessage(error);
+          throw new Error(detailedMessage || error.message || 'Role delete request failed');
+        }
+      };
+
+      try {
+        await deleteRoleDirect();
+      } catch (directError: unknown) {
+        const missingRolesTable = isMissingTableError(directError as SupabaseLikeError, 'roles');
+        const missingLegacyRolesTable = isMissingTableError(directError as SupabaseLikeError, 'clinic_roles');
+        if (!isPermissionDeniedError(directError) && !missingRolesTable && !missingLegacyRolesTable) {
+          throw directError;
+        }
+
+        await deleteRoleViaEdgeFunction();
+      }
+
+      setRoles((prev) => prev.filter((role) => role.name !== deleteRoleTarget.name));
+      setSelectedRole((prev) => (prev?.name === deleteRoleTarget.name ? null : prev));
+      setPermissions({});
+      toast.success('Role removed successfully.');
+    } catch (err: unknown) {
+      const message = getErrorMessage(err);
+      toast.error('Failed to remove role: ' + message);
+    } finally {
+      setDeletingRole(false);
+      setDeleteRoleTarget(null);
     }
   };
 
@@ -917,32 +1004,38 @@ export default function StaffRolesPage() {
         </div>
       </div>
 
-      <div className="bg-white rounded-2xl shadow-sm border border-gray-100 p-4">
-        <div className="flex flex-wrap items-end gap-4">
-          <div className="min-w-[240px] flex-1 max-w-sm">
-            <label className="mb-1.5 block text-xs font-semibold uppercase tracking-[0.14em] text-gray-500">
-              Select Clinic First
-            </label>
-            <select
-              value={selectedClinicId}
-              onChange={(e) => setSelectedClinicId(e.target.value)}
-              disabled={loadingClinics || !isAdmin || !hasMultipleClinics}
-              className="w-full px-3 py-2.5 text-sm border border-gray-200 rounded-xl focus:ring-2 focus:ring-sky-500 focus:border-sky-500 disabled:cursor-not-allowed disabled:bg-gray-50"
-            >
-              {isAdmin && hasMultipleClinics && <option value="">Choose a clinic</option>}
-              {clinics.map((clinic) => (
-                <option key={clinic.id} value={clinic.id}>
-                  {clinic.clinic_name}
-                </option>
-              ))}
-            </select>
-          </div>
+      {activeTab === 'team' ? (
+        <div className="bg-white rounded-2xl shadow-sm border border-gray-100 p-4">
+          <div className="flex flex-wrap items-end gap-4">
+            <div className="min-w-[240px] flex-1 max-w-sm">
+              <label className="mb-1.5 block text-xs font-semibold uppercase tracking-[0.14em] text-gray-500">
+                Select Clinic First
+              </label>
+              <select
+                value={selectedClinicId}
+                onChange={(e) => setSelectedClinicId(e.target.value)}
+                disabled={loadingClinics || !isAdmin || !hasMultipleClinics}
+                className="w-full px-3 py-2.5 text-sm border border-gray-200 rounded-xl focus:ring-2 focus:ring-sky-500 focus:border-sky-500 disabled:cursor-not-allowed disabled:bg-gray-50"
+              >
+                {isAdmin && hasMultipleClinics && <option value="">Choose a clinic</option>}
+                {clinics.map((clinic) => (
+                  <option key={clinic.id} value={clinic.id}>
+                    {clinic.clinic_name}
+                  </option>
+                ))}
+              </select>
+            </div>
 
-          <p className="pb-1 text-sm text-gray-600">
-            Managing: <span className="font-semibold text-gray-900">{selectedClinicName}</span>
-          </p>
+            <p className="pb-1 text-sm text-gray-600">
+              Managing: <span className="font-semibold text-gray-900">{selectedClinicName}</span>
+            </p>
+          </div>
         </div>
-      </div>
+      ) : (
+        <div className="bg-sky-50 rounded-2xl border border-sky-100 px-4 py-3.5 text-sm text-sky-800">
+          Roles created here are global and apply to all clinics.
+        </div>
+      )}
 
       {loadingClinics ? (
         <div className="bg-white rounded-2xl shadow-sm border border-gray-100 p-10 text-center text-gray-500">Loading clinics...</div>
@@ -1018,28 +1111,40 @@ export default function StaffRolesPage() {
               {loadingRoles ? (
                 <p className="px-2 py-3 text-sm text-gray-500">Loading roles...</p>
               ) : roles.length === 0 ? (
-                <p className="px-2 py-3 text-sm text-gray-500">No roles found for this clinic.</p>
+                <p className="px-2 py-3 text-sm text-gray-500">No roles found.</p>
               ) : (
                 roles.map((role) => (
-                  <button
-                    key={role.id}
-                    onClick={() => setSelectedRole(role)}
-                    className={`w-full rounded-xl border px-3 py-3 text-left transition ${
-                      selectedRole?.id === role.id
-                        ? 'border-sky-200 bg-sky-50 text-sky-700'
-                        : 'border-transparent bg-white text-gray-700 hover:bg-gray-50'
-                    }`}
-                  >
-                    <div className="flex items-center justify-between gap-2">
-                      <span className="font-medium">{normalizeRoleLabel(role.name)}</span>
-                      {role.is_system_default && (
-                        <span className="inline-flex items-center gap-1 rounded-full bg-gray-100 px-2 py-0.5 text-[10px] uppercase tracking-wide text-gray-500">
-                          <Lock size={10} />
-                          System
-                        </span>
-                      )}
-                    </div>
-                  </button>
+                  <div key={role.id} className="flex items-center gap-2">
+                    <button
+                      onClick={() => setSelectedRole(role)}
+                      className={`flex-1 rounded-xl border px-3 py-3 text-left transition ${
+                        selectedRole?.id === role.id
+                          ? 'border-sky-200 bg-sky-50 text-sky-700'
+                          : 'border-transparent bg-white text-gray-700 hover:bg-gray-50'
+                      }`}
+                    >
+                      <div className="flex items-center justify-between gap-2">
+                        <span className="font-medium">{normalizeRoleLabel(role.name)}</span>
+                        {role.is_system_default && (
+                          <span className="inline-flex items-center gap-1 rounded-full bg-gray-100 px-2 py-0.5 text-[10px] uppercase tracking-wide text-gray-500">
+                            <Lock size={10} />
+                            System
+                          </span>
+                        )}
+                      </div>
+                    </button>
+
+                    {!role.is_system_default && (
+                      <button
+                        type="button"
+                        onClick={() => setDeleteRoleTarget(role)}
+                        className="shrink-0 rounded-lg p-2 text-gray-400 hover:text-red-600 hover:bg-red-50 transition-colors"
+                        title="Remove role"
+                      >
+                        <Trash2 size={14} />
+                      </button>
+                    )}
+                  </div>
                 ))
               )}
             </div>
@@ -1092,13 +1197,25 @@ export default function StaffRolesPage() {
                     </p>
                   </div>
 
-                  <button
-                    onClick={() => void savePermissions()}
-                    disabled={savingPermissions}
-                    className="rounded-xl bg-sky-600 px-5 py-2.5 text-sm font-semibold text-white transition hover:bg-sky-700 disabled:cursor-not-allowed disabled:opacity-60"
-                  >
-                    {savingPermissions ? 'Saving...' : 'Save Changes'}
-                  </button>
+                  <div className="flex items-center gap-2">
+                    {!selectedRole.is_system_default && (
+                      <button
+                        type="button"
+                        onClick={() => setDeleteRoleTarget(selectedRole)}
+                        disabled={deletingRole}
+                        className="rounded-xl bg-red-600 px-4 py-2.5 text-sm font-semibold text-white transition hover:bg-red-700 disabled:cursor-not-allowed disabled:opacity-60"
+                      >
+                        Remove Role
+                      </button>
+                    )}
+                    <button
+                      onClick={() => void savePermissions()}
+                      disabled={savingPermissions}
+                      className="rounded-xl bg-sky-600 px-5 py-2.5 text-sm font-semibold text-white transition hover:bg-sky-700 disabled:cursor-not-allowed disabled:opacity-60"
+                    >
+                      {savingPermissions ? 'Saving...' : 'Save Changes'}
+                    </button>
+                  </div>
                 </div>
 
                 <div className="divide-y divide-gray-100 px-5">
@@ -1134,6 +1251,16 @@ export default function StaffRolesPage() {
           </section>
         </div>
       )}
+
+      <ConfirmDialog
+        isOpen={!!deleteRoleTarget}
+        onConfirm={handleDeleteRole}
+        onCancel={() => setDeleteRoleTarget(null)}
+        title="Remove Role"
+        message={`Remove role "${deleteRoleTarget ? normalizeRoleLabel(deleteRoleTarget.name) : ''}" from the system? This cannot be undone.`}
+        confirmLabel={deletingRole ? 'Removing...' : 'Remove'}
+        danger
+      />
     </div>
   );
 }

@@ -135,7 +135,7 @@ export default function UsersPage() {
       let modernQuery = supabase.from('roles').select('name, clinic_id, is_system_default').order('name');
 
       if (!isGlobalAdmin && clinicId) {
-        modernQuery = modernQuery.or(`is_system_default.eq.true,clinic_id.eq.${clinicId}`);
+        modernQuery = modernQuery.or(`is_system_default.eq.true,clinic_id.eq.${clinicId},clinic_id.is.null`);
       }
 
       const modernRes = await modernQuery;

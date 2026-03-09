@@ -336,6 +336,22 @@ export function AuthProvider({ children }: { children: ReactNode }) {
           }
         }
 
+        const globalRoleResult = await supabase
+          .from('roles')
+          .select('id')
+          .eq('name', profileData.role)
+          .is('clinic_id', null)
+          .maybeSingle();
+
+        if (globalRoleResult.error) {
+          if (isMissingTableError({ ...globalRoleResult.error, status: globalRoleResult.status }, 'roles')) {
+            return { id: null, missingTable: true };
+          }
+          console.error('Error looking up global role:', globalRoleResult.error);
+        } else if (globalRoleResult.data?.id) {
+          return { id: globalRoleResult.data.id, missingTable: false };
+        }
+
         const systemRoleResult = await supabase
           .from('roles')
           .select('id')

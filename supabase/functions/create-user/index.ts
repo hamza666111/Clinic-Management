@@ -77,6 +77,21 @@ Deno.serve(async (req: Request) => {
           }
         }
 
+        const globalRoleRes = await supabaseAdmin
+          .from("roles")
+          .select("id")
+          .eq("name", roleName)
+          .is("clinic_id", null)
+          .maybeSingle();
+
+        if (!globalRoleRes.error && globalRoleRes.data?.id) {
+          return globalRoleRes.data.id as string;
+        }
+
+        if (globalRoleRes.error && !isMissingTableError(globalRoleRes.error.message || "", "roles")) {
+          throw globalRoleRes.error;
+        }
+
         const systemRoleRes = await supabaseAdmin
           .from("roles")
           .select("id")
@@ -120,6 +135,24 @@ Deno.serve(async (req: Request) => {
             if (clinicRoleRes.error && !isMissingTableError(clinicRoleRes.error.message || "", "roles")) {
               throw clinicRoleRes.error;
             }
+          }
+
+          const globalRoleRes = await supabaseAdmin
+            .from("roles")
+            .select("id")
+            .eq("name", roleName)
+            .is("clinic_id", null)
+            .maybeSingle();
+
+          if (globalRoleRes.error) {
+            if (isMissingTableError(globalRoleRes.error.message || "", "roles")) {
+              return { found: false, missingTable: true };
+            }
+            throw globalRoleRes.error;
+          }
+
+          if (globalRoleRes.data?.id) {
+            return { found: true, missingTable: false };
           }
 
           const systemRoleRes = await supabaseAdmin
@@ -203,6 +236,7 @@ Deno.serve(async (req: Request) => {
     let body: {
       action?: string;
       user_id?: string;
+      role_id?: string;
       name?: string;
       email?: string;
       password?: string;
@@ -242,8 +276,15 @@ Deno.serve(async (req: Request) => {
         });
       }
 
+      const schemaHint = body.schema_mode === "roles" || body.schema_mode === "clinic_roles"
+        ? body.schema_mode
+        : "roles";
+
       let targetClinicId = body.clinic_id || null;
-      if (callerProfile.role === "clinic_admin") {
+
+      if (schemaHint === "roles") {
+        targetClinicId = null;
+      } else if (callerProfile.role === "clinic_admin") {
         if (!callerProfile.clinic_id) {
           return new Response(JSON.stringify({ error: "Clinic admin profile is missing clinic_id." }), {
             status: 403,
@@ -253,16 +294,12 @@ Deno.serve(async (req: Request) => {
         targetClinicId = callerProfile.clinic_id;
       }
 
-      if (!targetClinicId) {
-        return new Response(JSON.stringify({ error: "clinic_id is required for role creation." }), {
+      if (schemaHint === "clinic_roles" && !targetClinicId) {
+        return new Response(JSON.stringify({ error: "clinic_id is required for legacy role creation." }), {
           status: 400,
           headers: { ...corsHeaders, "Content-Type": "application/json" },
         });
       }
-
-      const schemaHint = body.schema_mode === "roles" || body.schema_mode === "clinic_roles"
-        ? body.schema_mode
-        : "clinic_roles";
 
       const createLegacyRole = async () => {
         const result = await supabaseAdmin
@@ -290,6 +327,33 @@ Deno.serve(async (req: Request) => {
       };
 
       const createModernRole = async () => {
+        let existingRoleQuery = supabaseAdmin
+          .from("roles")
+          .select("id")
+          .eq("name", normalizedRoleName);
+
+        if (targetClinicId) {
+          existingRoleQuery = existingRoleQuery.eq("clinic_id", targetClinicId);
+        } else {
+          existingRoleQuery = existingRoleQuery.is("clinic_id", null);
+        }
+
+        const existingRoleResult = await existingRoleQuery.maybeSingle();
+
+        if (existingRoleResult.error) {
+          if (!isMissingTableError({ message: existingRoleResult.error.message, code: existingRoleResult.error.code, status: existingRoleResult.status }, "roles")) {
+            throw existingRoleResult.error;
+          }
+
+          return { missingTable: true as const, role: null as null };
+        }
+
+        if (existingRoleResult.data?.id) {
+          const duplicateError = new Error("Role already exists") as Error & { code?: string };
+          duplicateError.code = "23505";
+          throw duplicateError;
+        }
+
         const result = await supabaseAdmin
           .from("roles")
           .insert([{ name: normalizedRoleName, clinic_id: targetClinicId, is_system_default: false }])
@@ -355,13 +419,136 @@ Deno.serve(async (req: Request) => {
         const code = (errorObj.code || "").toUpperCase();
 
         if (code === "23505") {
-          return new Response(JSON.stringify({ error: "This role already exists in the selected clinic." }), {
+          return new Response(JSON.stringify({ error: "This role already exists." }), {
             status: 409,
             headers: { ...corsHeaders, "Content-Type": "application/json" },
           });
         }
 
         return new Response(JSON.stringify({ error: errorObj.message || "Failed to create role." }), {
+          status: 400,
+          headers: { ...corsHeaders, "Content-Type": "application/json" },
+        });
+      }
+    }
+
+    if (action === "delete_role") {
+      const normalizedRoleName = normalizeRoleName(String(body.role_name || ""));
+      const roleId = body.role_id || null;
+
+      if (!roleId && !normalizedRoleName) {
+        return new Response(JSON.stringify({ error: "role_id or role_name is required." }), {
+          status: 400,
+          headers: { ...corsHeaders, "Content-Type": "application/json" },
+        });
+      }
+
+      const schemaHint = body.schema_mode === "roles" || body.schema_mode === "clinic_roles"
+        ? body.schema_mode
+        : "roles";
+
+      const ensureRoleNotInUse = async (roleName: string) => {
+        const inUseResult = await supabaseAdmin
+          .from("users_profile")
+          .select("id", { count: "exact", head: true })
+          .eq("role", roleName);
+
+        if (inUseResult.error) {
+          throw inUseResult.error;
+        }
+
+        if ((inUseResult.count || 0) > 0) {
+          throw new Error("Cannot remove this role because it is assigned to one or more users.");
+        }
+      };
+
+      try {
+        if (schemaHint === "roles") {
+          let modernRoleLookup = supabaseAdmin
+            .from("roles")
+            .select("id, name, is_system_default")
+            .limit(1);
+
+          if (roleId) {
+            modernRoleLookup = modernRoleLookup.eq("id", roleId);
+          } else {
+            modernRoleLookup = modernRoleLookup.eq("name", normalizedRoleName).is("clinic_id", null);
+          }
+
+          const modernRole = await modernRoleLookup.maybeSingle();
+
+          if (modernRole.error) {
+            if (!isMissingTableError({ message: modernRole.error.message, code: modernRole.error.code, status: modernRole.status }, "roles")) {
+              throw modernRole.error;
+            }
+          } else if (modernRole.data) {
+            if (modernRole.data.is_system_default) {
+              return new Response(JSON.stringify({ error: "System default roles cannot be removed." }), {
+                status: 400,
+                headers: { ...corsHeaders, "Content-Type": "application/json" },
+              });
+            }
+
+            await ensureRoleNotInUse(modernRole.data.name);
+
+            const { error: deleteModernError } = await supabaseAdmin
+              .from("roles")
+              .delete()
+              .eq("id", modernRole.data.id);
+
+            if (deleteModernError) {
+              throw deleteModernError;
+            }
+
+            return new Response(JSON.stringify({ success: true }), {
+              status: 200,
+              headers: { ...corsHeaders, "Content-Type": "application/json" },
+            });
+          }
+        }
+
+        if (!normalizedRoleName) {
+          return new Response(JSON.stringify({ error: "role_name is required for legacy role deletion." }), {
+            status: 400,
+            headers: { ...corsHeaders, "Content-Type": "application/json" },
+          });
+        }
+
+        if (CORE_USER_ROLES.includes(normalizedRoleName)) {
+          return new Response(JSON.stringify({ error: "System default roles cannot be removed." }), {
+            status: 400,
+            headers: { ...corsHeaders, "Content-Type": "application/json" },
+          });
+        }
+
+        await ensureRoleNotInUse(normalizedRoleName);
+
+        let legacyDelete = supabaseAdmin
+          .from("clinic_roles")
+          .delete()
+          .eq("role_name", normalizedRoleName);
+
+        if (callerProfile.role === "clinic_admin" && callerProfile.clinic_id) {
+          legacyDelete = supabaseAdmin
+            .from("clinic_roles")
+            .delete()
+            .eq("role_name", normalizedRoleName)
+            .eq("clinic_id", callerProfile.clinic_id);
+        }
+
+        const { error: deleteLegacyError } = await legacyDelete;
+
+        if (deleteLegacyError) {
+          throw deleteLegacyError;
+        }
+
+        return new Response(JSON.stringify({ success: true }), {
+          status: 200,
+          headers: { ...corsHeaders, "Content-Type": "application/json" },
+        });
+      } catch (deleteRoleErr) {
+        const errorObj = deleteRoleErr as { message?: string };
+        return new Response(JSON.stringify({ error: errorObj.message || "Failed to delete role." }), {
           status: 400,
           headers: { ...corsHeaders, "Content-Type": "application/json" },
         });
