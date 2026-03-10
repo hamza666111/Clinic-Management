@@ -105,7 +105,7 @@ export default function PrescriptionsPage() {
   const fetchPrescriptions = useCallback(async () => {
     setLoading(true);
     let q = supabase.from('prescriptions')
-      .select('*, patient:patients(name, contact), doctor:users_profile!doctor_id(name)')
+      .select('*, patient:patients(name, contact), doctor:users_profile!doctor_id(name), creator:users_profile!created_by(name)')
       .order('created_at', { ascending: false });
     if (profile?.role === 'doctor') q = q.eq('doctor_id', profile.id);
     if (search) q = q.ilike('treatments', `%${search}%`);
@@ -209,6 +209,7 @@ export default function PrescriptionsPage() {
     const { error } = await supabase.from('prescriptions').insert({
       patient_id: form.patient_id,
       doctor_id: (profile?.role === 'admin' || profile?.role === 'clinic_admin') ? (form.doctor_id || profile?.id) : profile?.id,
+      created_by: profile?.id || null,
       treatments: form.treatments,
       medicines: cleanedMeds,
       notes: form.notes,
@@ -311,6 +312,7 @@ export default function PrescriptionsPage() {
                     <td className="px-5 py-4">
                       <p className="font-medium text-gray-900 text-sm">{(rx.patient as unknown as { name: string })?.name}</p>
                       <p className="text-xs text-gray-500">{(rx.patient as unknown as { contact: string })?.contact}</p>
+                      <p className="text-[11px] text-gray-400 mt-0.5">Created by: {(rx.creator as unknown as { name: string })?.name || 'Unknown'}</p>
                     </td>
                     <td className="px-5 py-4 hidden md:table-cell text-sm text-gray-700 max-w-xs truncate">{rx.treatments || '—'}</td>
                     <td className="px-5 py-4 hidden sm:table-cell text-sm text-gray-700">{(rx.doctor as unknown as { name: string })?.name || '—'}</td>
@@ -545,6 +547,10 @@ export default function PrescriptionsPage() {
                     <div>
                       <p className="text-xs text-gray-500 mb-0.5">Issued</p>
                       <p className="font-semibold text-gray-900">{format(new Date(viewPrescription.created_at), 'MMM d, yyyy')}</p>
+                    </div>
+                    <div>
+                      <p className="text-xs text-gray-500 mb-0.5">Created By</p>
+                      <p className="font-semibold text-gray-900">{(viewPrescription.creator as unknown as { name: string })?.name || 'Unknown'}</p>
                     </div>
                   </div>
                   {(viewPrescription.start_date || viewPrescription.end_date) && (

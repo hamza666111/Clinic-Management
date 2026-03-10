@@ -54,6 +54,7 @@ export interface Appointment {
   patient_id: string;
   doctor_id: string | null;
   clinic_id: string | null;
+  created_by?: string | null;
   appointment_date: string;
   appointment_time: string;
   status: 'scheduled' | 'confirmed' | 'completed' | 'cancelled' | 'no-show';
@@ -62,6 +63,7 @@ export interface Appointment {
   patient?: Patient;
   doctor?: UserProfile;
   clinic?: Clinic;
+  creator?: UserProfile;
 }
 
 export interface DentalService {
@@ -103,6 +105,7 @@ export interface Prescription {
   id: string;
   patient_id: string;
   doctor_id: string | null;
+  created_by?: string | null;
   treatments: string;
   medicines: PrescriptionMedicine[];
   notes: string;
@@ -111,6 +114,7 @@ export interface Prescription {
   created_at: string;
   patient?: Patient;
   doctor?: UserProfile;
+  creator?: UserProfile;
 }
 
 export interface InvoiceItem {
@@ -133,6 +137,7 @@ export interface Invoice {
   patient_id: string;
   clinic_id: string | null;
   doctor_id: string | null;
+  created_by?: string | null;
   items: InvoiceItem[];
   doctor_fee: number;
   discount_type?: 'amount' | 'percentage' | null;
@@ -145,4 +150,5 @@ export interface Invoice {
   patient?: Patient;
   doctor?: UserProfile;
   clinic?: Clinic;
+  creator?: UserProfile;
 }

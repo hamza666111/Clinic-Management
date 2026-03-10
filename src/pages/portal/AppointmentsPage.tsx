@@ -1,5 +1,5 @@
 import { useState, useEffect, useCallback, useMemo } from 'react';
-import { Plus, Search, Edit2, Trash2, Calendar, ChevronLeft, ChevronRight, UserPlus, ChevronDown } from 'lucide-react';
+import { Plus, Search, Edit2, Trash2, Calendar, ChevronLeft, ChevronRight, UserPlus, ChevronDown, Clock, MessageCircle } from 'lucide-react';
 import { supabase } from '../../lib/supabase';
 import { Appointment, Patient, Clinic, UserProfile } from '../../lib/types';
 import { useAuth } from '../../contexts/AuthContext';
@@ -57,7 +57,7 @@ export default function AppointmentsPage() {
   const fetchAppointments = useCallback(async () => {
     setLoading(true);
     let q = supabase.from('appointments')
-      .select('*, patient:patients(name, contact), doctor:users_profile!doctor_id(name), clinic:clinics(clinic_name)')
+      .select('*, patient:patients(name, contact), doctor:users_profile!doctor_id(name), clinic:clinics(clinic_name), creator:users_profile!created_by(name)')
       .order('appointment_date', { ascending: false })
       .order('appointment_time', { ascending: true });
     if (profile?.role === 'doctor') q = q.eq('doctor_id', profile.id);
@@ -197,7 +197,10 @@ export default function AppointmentsPage() {
     };
     const { error } = editAppt
       ? await supabase.from('appointments').update(payload).eq('id', editAppt.id)
-      : await supabase.from('appointments').insert(payload);
+      : await supabase.from('appointments').insert({
+        ...payload,
+        created_by: profile?.id || null,
+      });
     setSaving(false);
     if (error) { toast.error('Failed to save appointment.'); return; }
     toast.success(editAppt ? 'Appointment updated.' : 'Appointment scheduled.');
@@ -229,6 +232,42 @@ export default function AppointmentsPage() {
     return map;
   }, [appointments]);
 
+  const todayIso = format(new Date(), 'yyyy-MM-dd');
+
+  const appointmentCounts = useMemo(() => {
+    const today = appointments.filter((appt) => appt.appointment_date === todayIso).length;
+    const upcoming = appointments.filter((appt) => (
+      appt.appointment_date > todayIso
+      && (appt.status === 'scheduled' || appt.status === 'confirmed')
+    )).length;
+
+    return { today, upcoming };
+  }, [appointments, todayIso]);
+
+  const getWhatsAppReminderUrl = (appt: Appointment) => {
+    const patient = appt.patient as unknown as { name?: string; contact?: string } | undefined;
+    const phone = (patient?.contact || '').replace(/\D/g, '');
+    if (!phone) return null;
+
+    const patientName = patient?.name?.trim() || 'Patient';
+    const appointmentDate = format(new Date(`${appt.appointment_date}T00:00:00`), 'EEEE, MMM d, yyyy');
+    const appointmentTime = appt.appointment_time?.slice(0, 5) || '';
+    const timeText = appointmentTime ? ` at ${appointmentTime}` : '';
+    const reminderMessage = `Hello ${patientName}, this is a friendly reminder for your appointment on ${appointmentDate}${timeText}. Please reply to confirm.`;
+
+    return `https://wa.me/${phone}?text=${encodeURIComponent(reminderMessage)}`;
+  };
+
+  const handleWhatsAppReminder = (appt: Appointment) => {
+    const reminderUrl = getWhatsAppReminderUrl(appt);
+    if (!reminderUrl) {
+      toast.error('Patient contact number is missing or invalid for WhatsApp.');
+      return;
+    }
+
+    window.open(reminderUrl, '_blank', 'noopener,noreferrer');
+  };
+
   return (
     <div className="p-6 space-y-6">
       <div className="flex flex-wrap items-center gap-3 justify-between">
@@ -246,6 +285,34 @@ export default function AppointmentsPage() {
         <button onClick={openAdd} className="flex items-center gap-2 px-4 py-2.5 bg-sky-600 text-white rounded-xl hover:bg-sky-700 transition-colors text-sm font-medium">
           <Plus className="w-4 h-4" /> Schedule Appointment
         </button>
+      </div>
+
+      <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
+        <div className="bg-white rounded-2xl border border-gray-100 p-4 shadow-sm">
+          <div className="flex items-center justify-between">
+            <div>
+              <p className="text-sm text-gray-500">Today&apos;s Appointments</p>
+              <p className="text-2xl font-bold text-gray-900 mt-0.5">{appointmentCounts.today}</p>
+            </div>
+            <div className="w-10 h-10 bg-sky-100 text-sky-700 rounded-xl flex items-center justify-center">
+              <Calendar className="w-5 h-5" />
+            </div>
+          </div>
+          <p className="text-xs text-gray-400 mt-2">Appointments on {format(new Date(), 'MMM d, yyyy')}</p>
+        </div>
+
+        <div className="bg-white rounded-2xl border border-gray-100 p-4 shadow-sm">
+          <div className="flex items-center justify-between">
+            <div>
+              <p className="text-sm text-gray-500">Upcoming Appointments</p>
+              <p className="text-2xl font-bold text-gray-900 mt-0.5">{appointmentCounts.upcoming}</p>
+            </div>
+            <div className="w-10 h-10 bg-emerald-100 text-emerald-700 rounded-xl flex items-center justify-center">
+              <Clock className="w-5 h-5" />
+            </div>
+          </div>
+          <p className="text-xs text-gray-400 mt-2">Future appointments with scheduled or confirmed status</p>
+        </div>
       </div>
 
       {view === 'calendar' ? (
@@ -305,6 +372,7 @@ export default function AppointmentsPage() {
                     <td className="px-5 py-4">
                       <p className="font-medium text-gray-900 text-sm">{(appt.patient as unknown as { name: string })?.name}</p>
                       <p className="text-xs text-gray-500">{(appt.patient as unknown as { contact: string })?.contact}</p>
+                      <p className="text-[11px] text-gray-400 mt-0.5">Created by: {(appt.creator as unknown as { name: string })?.name || 'Unknown'}</p>
                     </td>
                     <td className="px-5 py-4 hidden sm:table-cell">
                       <p className="text-sm text-gray-900">{format(new Date(appt.appointment_date), 'MMM d, yyyy')}</p>
@@ -316,6 +384,14 @@ export default function AppointmentsPage() {
                     </td>
                     <td className="px-5 py-4">
                       <div className="flex items-center gap-1 justify-end">
+                        <button
+                          onClick={() => handleWhatsAppReminder(appt)}
+                          className="p-2 text-gray-400 hover:text-emerald-600 hover:bg-emerald-50 rounded-lg transition-colors"
+                          title="Send WhatsApp reminder"
+                          aria-label="Send WhatsApp reminder"
+                        >
+                          <MessageCircle className="w-4 h-4" />
+                        </button>
                         <button onClick={() => openEdit(appt)} className="p-2 text-gray-400 hover:text-sky-600 hover:bg-sky-50 rounded-lg transition-colors"><Edit2 className="w-4 h-4" /></button>
                         <button onClick={() => setDeleteAppt(appt)} className="p-2 text-gray-400 hover:text-red-600 hover:bg-red-50 rounded-lg transition-colors"><Trash2 className="w-4 h-4" /></button>
                       </div>

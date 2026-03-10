@@ -167,7 +167,7 @@ export default function BillingPage() {
   const fetchInvoices = useCallback(async () => {
     setLoading(true);
     let q = supabase.from('invoices')
-      .select('*, patient:patients(name, contact), doctor:users_profile!doctor_id(name), clinic:clinics(clinic_name, address, phone)')
+      .select('*, patient:patients(name, contact), doctor:users_profile!doctor_id(name), clinic:clinics(clinic_name, address, phone), creator:users_profile!created_by(name)')
       .order('created_at', { ascending: false });
     if (profile?.role === 'doctor') q = q.eq('doctor_id', profile.id);
     const { data } = await q;
@@ -254,6 +254,7 @@ export default function BillingPage() {
       patient_id: form.patient_id,
       clinic_id: form.clinic_id || null,
       doctor_id: (profile?.role === 'admin' || profile?.role === 'clinic_admin') ? (form.doctor_id || profile?.id) : profile?.id,
+      created_by: profile?.id || null,
       items: form.items.filter(i => i.description && i.description !== '__custom__'),
       doctor_fee: Number(form.doctor_fee || 0),
       total_amount: totalAmount,
@@ -271,14 +272,14 @@ export default function BillingPage() {
     let { data, error } = await supabase
       .from('invoices')
       .insert(payloadWithDiscount)
-      .select('*, patient:patients(name, contact), doctor:users_profile!doctor_id(name), clinic:clinics(clinic_name, address, phone)')
+      .select('*, patient:patients(name, contact), doctor:users_profile!doctor_id(name), clinic:clinics(clinic_name, address, phone), creator:users_profile!created_by(name)')
       .maybeSingle();
 
     if (error && isMissingDiscountColumnError(error)) {
       ({ data, error } = await supabase
         .from('invoices')
         .insert(baseInvoicePayload)
-        .select('*, patient:patients(name, contact), doctor:users_profile!doctor_id(name), clinic:clinics(clinic_name, address, phone)')
+        .select('*, patient:patients(name, contact), doctor:users_profile!doctor_id(name), clinic:clinics(clinic_name, address, phone), creator:users_profile!created_by(name)')
         .maybeSingle());
     }
 
@@ -436,6 +437,7 @@ export default function BillingPage() {
                 <tr key={inv.id} className="border-b border-gray-50 hover:bg-gray-50 transition-colors">
                   <td className="px-5 py-4">
                     <p className="font-medium text-gray-900 text-sm">{(inv.patient as unknown as { name: string })?.name}</p>
+                    <p className="text-[11px] text-gray-400 mt-0.5">Created by: {(inv.creator as unknown as { name: string })?.name || 'Unknown'}</p>
                   </td>
                   <td className="px-5 py-4 hidden md:table-cell text-sm text-gray-700">{(inv.doctor as unknown as { name: string })?.name || '—'}</td>
                   <td className="px-5 py-4 hidden sm:table-cell">
@@ -875,6 +877,7 @@ export default function BillingPage() {
               <div><p className="text-xs text-gray-500 mb-1">Patient</p><p className="font-semibold">{(viewInvoice.patient as unknown as { name: string })?.name}</p></div>
               <div><p className="text-xs text-gray-500 mb-1">Doctor</p><p className="font-semibold">{(viewInvoice.doctor as unknown as { name: string })?.name || '—'}</p></div>
               <div><p className="text-xs text-gray-500 mb-1">Date</p><p className="font-semibold">{format(new Date(viewInvoice.created_at), 'MMMM d, yyyy')}</p></div>
+              <div><p className="text-xs text-gray-500 mb-1">Created By</p><p className="font-semibold">{(viewInvoice.creator as unknown as { name: string })?.name || 'Unknown'}</p></div>
               <div>
                 <p className="text-xs text-gray-500 mb-1">Status</p>
                 <span className={`text-xs font-semibold px-2.5 py-1 rounded-full ${STATUS_COLORS[viewInvoice.status]}`}>{STATUS_LABELS[viewInvoice.status]}</span>
